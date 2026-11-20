@@ -1,0 +1,8 @@
+{
+  "name": "rootquest",
+  "version": "1.0.0",
+  "description": "词根驿站：用词根、前缀、后缀闯关学 1000 个英语单词",
+  "private": true,
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
