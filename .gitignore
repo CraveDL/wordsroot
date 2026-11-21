@@ -1,4 +1,6 @@
+data/app.db
+data/app.db-*
 data/accounts.json
-data/accounts.json.tmp
-data/all.json
+data/accounts.json.*
+data/lexicon.db-*
 node_modules/

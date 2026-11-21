@@ -3,9 +3,18 @@
 (() => {
   const D = window.RQ_DATA, W = D.words, L = D.levels, ST = window.RQ_STAMPS;
   const ROOT = Object.fromEntries(D.roots.map(r => [r.r, r.m]));
-  const CH = 10, CHN = Math.ceil(L.length / CH);
-  const CH_NAMES = ['初出茅庐', '小试牛刀', '渐入佳境', '势如破竹', '融会贯通', '游刃有余', '出类拔萃', '炉火纯青', '登堂入室', '登峰造极', '百尺竿头', '更上层楼', '乘风破浪', '厚积薄发', '触类旁通', '举一反三', '博闻强识', '学富五车', '妙笔生花', '出神入化', '返璞归真', '万词归宗'];
+  const RINFO = Object.fromEntries(D.roots.map(r => [r.r, r]));
+  const rootName = r => (RINFO[r] && RINFO[r].d) || r.replace(/#\d$/, '').replace(/,/g, ', ');
   const STARTS = D.starts || [0];
+  // chapters: every 10 stations, restarting at the first station of each volume
+  const CHS = [], chOf = [];
+  STARTS.forEach((s, v) => { const end = STARTS[v + 1] ?? L.length; for (let a = s; a < end; a += 10) { const b = Math.min(end, a + 10); for (let i = a; i < b; i++) chOf[i] = CHS.length; CHS.push({ a, b, v: v + 1 }); } });
+  const CHN = CHS.length;
+  const NAMES = ['初出茅庐', '小试牛刀', '渐入佳境', '势如破竹', '融会贯通', '游刃有余', '出类拔萃', '炉火纯青', '登堂入室', '登峰造极', '百尺竿头', '更上层楼', '乘风破浪', '厚积薄发', '触类旁通', '举一反三', '博闻强识', '学富五车', '妙笔生花', '出神入化', '循序渐进', '持之以恒', '锲而不舍', '水滴石穿', '聚沙成塔', '日积月累', '勤能补拙', '温故知新', '学以致用', '见微知著', '一目十行', '过目不忘', '博古通今', '才高八斗', '满腹经纶', '文思泉涌', '下笔成章', '口若悬河', '字字珠玑', '独占鳌头', '名列前茅', '鹏程万里', '青出于蓝', '一鸣惊人', '大显身手', '志存高远', '精益求精', '专心致志', '手不释卷', '孜孜不倦', '熟能生巧', '驾轻就熟', '得心应手', '胸有成竹', '闻鸡起舞', '囊萤映雪', '韦编三绝', '悬梁刺股', '凿壁偷光', '返璞归真'];
+  const CH_NAMES = CHS.map((_, c) => (c === CHN - 1 ? '万词归宗' : NAMES[c] || `第${c + 1}章`));
+  const EXAM = { 初: '初中', 四: '四级', 六: '六级', 研: '考研', 托: '托福', G: 'GRE' };
+  const WIDX = new Map(W.map((w, i) => [w.w.toLowerCase(), i]));
+  const LIDX = new Map(L.map((l, i) => [l.k, i]));
   const INKS = ['red', 'blue', 'teal', 'plum', 'amber', 'ink'];
   const TITLES = [[1, '见习旅人'], [3, '词根学徒'], [6, '拆词工匠'], [10, '词缀猎手'], [15, '词源学者'], [22, '词根大师'], [30, '万词归宗']];
   const KIND = { p: '前缀', r: '词根', s: '后缀', c: '连接', x: '记忆块' };
@@ -29,8 +38,52 @@
   // ---------- state ----------
   let store = null, user = null, P = null, view = 'map', authTab = 'login', ses = null, tts = null;
   const openCh = new Set();
-  const blank = () => ({ v: 1, xp: 0, stars: {}, boss: {}, when: {}, wrong: {}, streak: 0, last: '', right: 0, total: 0, sound: true });
-  const normalize = p => Object.assign(blank(), p && typeof p === 'object' ? p : {});
+  const blank = () => ({ v: 2, xp: 0, stars: {}, boss: {}, when: {}, wrong: {}, streak: 0, last: '', right: 0, total: 0, sound: true });
+  let orphan = { stars: {}, when: {}, boss: {}, wrong: {} }; // saved entries this word list no longer has; kept so they survive a save
+  const chKey = c => L[CHS[c].a].k;
+  // Saved progress (v2) is keyed by station key, chapter key and word text, so it survives changes to the word list.
+  function normalize(saved) {
+    const p = blank();
+    orphan = { stars: {}, when: {}, boss: {}, wrong: {} };
+    if (!saved || typeof saved !== 'object') return p;
+    for (const k of ['xp', 'streak', 'last', 'right', 'total', 'sound']) if (saved[k] !== undefined) p[k] = saved[k];
+    if (saved.v !== 2) return migrateV1(saved, p);
+    const map = (from, to, idx, bin) => Object.entries(from || {}).forEach(([k, v]) => { const i = idx(k); if (i === undefined) orphan[bin][k] = v; else to[i] = v; });
+    map(saved.stars, p.stars, k => LIDX.get(k), 'stars');
+    map(saved.when, p.when, k => LIDX.get(k), 'when');
+    const CIDX = new Map(CHS.map((_, c) => [chKey(c), c]));
+    map(saved.boss, p.boss, k => CIDX.get(k), 'boss');
+    map(saved.wrong, p.wrong, k => WIDX.get(k), 'wrong');
+    return p;
+  }
+  function toSaved(p) {
+    const o = { v: 2, xp: p.xp, streak: p.streak, last: p.last, right: p.right, total: p.total, sound: p.sound, stars: { ...orphan.stars }, when: { ...orphan.when }, boss: { ...orphan.boss }, wrong: { ...orphan.wrong } };
+    for (const i in p.stars) o.stars[L[i].k] = p.stars[i];
+    for (const i in p.when) o.when[L[i].k] = p.when[i];
+    for (const c in p.boss) o.boss[chKey(c)] = p.boss[c];
+    for (const i in p.wrong) o.wrong[W[i].w.toLowerCase()] = p.wrong[i];
+    return o;
+  }
+  // First version (2000 words) saved plain indices. Map them through the old layout: a station counts as cleared
+  // when at least half of its words were in stations cleared before.
+  function migrateV1(old, p) {
+    const lg = D.legacy;
+    if (!lg) return p;
+    const best = new Map(), when = new Map();
+    for (const [i, st] of Object.entries(old.stars || {})) {
+      const lv = lg.levels[i]; if (!lv) continue;
+      for (const wi of lv) { const w = lg.words[wi]; best.set(w, Math.max(best.get(w) || 0, st)); if (old.when && old.when[i]) when.set(w, old.when[i]); }
+    }
+    L.forEach((l, i) => {
+      const hit = l.words.map(wi => W[wi].w).filter(w => best.has(w));
+      if (hit.length && hit.length * 2 >= l.words.length) { p.stars[i] = Math.min(...hit.map(w => best.get(w))); p.when[i] = hit.map(w => when.get(w)).filter(Boolean).sort().pop() || day(); }
+    });
+    for (const [i, n] of Object.entries(old.wrong || {})) { const w = lg.words[i]; const ni = w && WIDX.get(w.toLowerCase()); if (ni !== undefined) p.wrong[ni] = n; }
+    const sealed = Math.max(0, ...Object.values(old.boss || {}));
+    if (sealed) CHS.forEach((ch, c) => { let all = true; for (let i = ch.a; i < ch.b; i++) if (!p.stars[i]) all = false; if (all) p.boss[c] = sealed; });
+    p.migrated = true;
+    return p;
+  }
   const curLevel = () => { let i = 0; while (i < L.length && P.stars[i]) i++; return i; };
   const cleared = () => Object.keys(P.stars).length;
   const learned = () => Object.keys(P.stars).reduce((n, i) => n + (L[i] ? L[i].words.length : 0), 0);
@@ -55,7 +108,7 @@
       register: async (u, p) => take(await api('register', 'POST', { username: u, password: p })),
       login: async (u, p) => take(await api('login', 'POST', { username: u, password: p })),
       logout: () => api('logout', 'POST').catch(() => {}),
-      save: p => api('progress', 'PUT', { progress: p }),
+      save: p => api('progress', 'PUT', { progress: toSaved(p) }),
     };
   }
   async function sha(text) {
@@ -84,7 +137,7 @@
         enter(rec);
       },
       logout: async () => LS.del('rq_session'),
-      save: async p => { LS.set('rq_prog_' + user.name.toLowerCase(), p); },
+      save: async p => { LS.set('rq_prog_' + user.name.toLowerCase(), toSaved(p)); },
     };
   }
   async function claudeStore() {
@@ -101,7 +154,7 @@
     let chain = Promise.resolve();
     return {
       mode: 'claude', note: '已用你的 Claude 账号登录，进度自动保存到云端，只有你自己能看到。',
-      save: p => (chain = chain.then(() => ref.set({ json: JSON.stringify(p), updated: Date.now() }))),
+      save: p => (chain = chain.then(() => ref.set({ json: JSON.stringify(toSaved(p)), updated: Date.now() }))),
     };
   }
   let saveTimer = null;
@@ -135,13 +188,14 @@
   const tile = (p, gloss = true, cls = '') => `<span class="tile ${p.k} ${cls}">${h(p.t)}${gloss && p.g ? `<small>${h(p.g)}</small>` : gloss && p.k !== 'c' ? `<small>${KIND[p.k]}</small>` : ''}</span>`;
   const tiles = (w, gloss = true) => `<div class="tiles">${w.p.map(p => tile(p, gloss)).join('<span class="plus">+</span>')}</div>`;
   const sayBtn = w => `<button class="say" data-a="say" data-w="${h(w)}" aria-label="朗读 ${h(w)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></button>`;
-  const stampFor = (i, rough) => ST.station({ label: lvLabel(i), sub: lvMean(i), no: i + 1, stars: P.stars[i] || 1, ink: INKS[Math.floor(i / CH) % INKS.length], date: P.when[i], rough });
+  const stampFor = (i, rough) => ST.station({ label: lvLabel(i), sub: lvMean(i), no: i + 1, stars: P.stars[i] || 1, ink: INKS[chOf[i] % INKS.length], date: P.when[i], rough });
   const sealFor = (c, rough) => ST.seal({ text: CH_NAMES[c], stars: P.boss[c] || 1, rough });
   const legend = `<div class="legend"><span><i style="background:var(--blue)"></i>前缀</span><span><i style="background:var(--red)"></i>词根</span><span><i style="background:var(--teal)"></i>后缀</span><span><i style="background:var(--amber)"></i>记忆块</span></div>`;
 
   // ---------- shell ----------
   function render() {
     if (!user) return renderAuth();
+    if (P.migrated) { delete P.migrated; save(); setTimeout(() => toast('词库已更新，旧进度已换算到新关卡'), 300); }
     const lv = levelOf(P.xp);
     const tabs = [['map', '路线'], ['album', '集章册'], ['codex', '词根图鉴'], ['me', '我的']];
     app.innerHTML = `
@@ -194,14 +248,14 @@
     let out = '';
     if (!cleared()) out += `<div class="card" style="margin-bottom:18px;display:grid;gap:10px"><h2>${h(user.name)}，从第 1 站出发</h2><p class="muted">每一站先认识这组词根下的单词，再闯关。通关盖站章，三星通关的章纹更完整。</p>${legend}</div>`;
     for (let c = 0; c < CHN; c++) {
-      const a = c * CH, b = Math.min(L.length, a + CH), n = b - a;
+      const { a, b } = CHS[c], n = b - a;
       let done = 0; for (let i = a; i < b; i++) if (P.stars[i]) done++;
       const open = openCh.has(c) || (cur >= a && cur < b) || front.some(i => i >= a && i < b) || (cur >= L.length && c === CHN - 1 && !openCh.size);
       const bossOpen = done === n;
       out += `<section class="chapter">
         <button class="ch-head" data-a="ch" data-i="${c}" aria-expanded="${open}">
           <span class="ch-seal ${P.boss[c] ? '' : 'empty'}">${P.boss[c] ? sealFor(c) : c + 1}</span>
-          <span><span class="small muted">第 ${c + 1} 章</span><h2>${CH_NAMES[c]}</h2></span>
+          <span><span class="small muted">${CHS[c].v === 1 ? '上册' : '下册'} · 第 ${c + 1} 章</span><h2>${CH_NAMES[c]}</h2></span>
           <span class="ch-prog num">${done}/${n}</span>
         </button>`;
       if (open) {
@@ -232,7 +286,7 @@
     out += '</div>';
     if (!cleared()) out += `<p class="muted" style="margin-top:18px">集章册还是空的。通关第 1 站，第一枚站章就盖在这里。</p>`;
     for (let c = 0; c < CHN; c++) {
-      const a = c * CH, b = Math.min(L.length, a + CH);
+      const { a, b } = CHS[c];
       let done = 0; for (let i = a; i < b; i++) if (P.stars[i]) done++;
       out += `<div class="section-h"><h2>第 ${c + 1} 章 ${CH_NAMES[c]}</h2><span class="muted num">${done}/${b - a}</span></div><div class="album">`;
       for (let i = a; i < b; i++) out += P.stars[i] ? `<button class="slot" data-a="stampView" data-i="${i}">${stampFor(i)}</button>` : `<div class="slot empty">${String(i + 1).padStart(3, '0')}</div>`;
@@ -243,10 +297,10 @@
 
   function viewCodex() {
     const seen = new Set(); Object.keys(P.stars).forEach(i => L[i] && L[i].roots.forEach(r => seen.add(r)));
-    const chip = (k, t, g, a, on = true) => `<button class="tile ${on ? k : 'c'}" data-a="${a}" data-v="${h(t)}">${h(t.replace(/,/g, ' / '))}<small>${h(g)}</small></button>`;
+    const chip = (k, t, g, a, on = true, label = t) => `<button class="tile ${on ? k : 'c'}" data-a="${a}" data-v="${h(t)}">${h(label)}<small>${h(g)}</small></button>`;
     return `<p class="muted" style="margin-bottom:6px">点任意一块，看它出现在哪些单词里。亮起的词根是你已经通关的。</p>${legend}
       <div class="section-h"><h2>词根</h2><span class="muted num">${seen.size}/${D.roots.length}</span></div>
-      <div class="chips">${D.roots.map(r => chip('r', r.r, r.m, 'cxRoot', seen.has(r.r))).join('')}</div>
+      <div class="chips">${D.roots.map(r => chip('r', r.r, r.m, 'cxRoot', seen.has(r.r), rootName(r.r))).join('')}</div>
       <div class="section-h"><h2>常见前缀</h2><span class="muted num">${D.affixes.p.length}</span></div>
       <div class="chips">${D.affixes.p.map(x => chip('p', x.t + '-', x.g, 'cxP')).join('')}</div>
       <div class="section-h"><h2>常见后缀</h2><span class="muted num">${D.affixes.s.length}</span></div>
@@ -288,7 +342,7 @@
     const lv = L[i], st = P.stars[i];
     openOverlay(sheet(`
       <div class="sheet-head"><div><span class="small muted num">第 ${i + 1} 站</span><h1 class="bigword">${h(lvTitle(i))}</h1></div>${st ? `<div class="mini">${stampFor(i, true)}</div>` : ''}</div>
-      <div class="chips">${lv.roots.map(r => `<span class="tile r">${h(r.replace(/,/g, ' / '))}<small>${h(ROOT[r])}</small></span>`).join('')}</div>
+      <div class="roots-info">${lv.roots.map(r => `<div class="root-card"><span class="tile r">${h(rootName(r))}<small>${h(ROOT[r])}</small></span>${RINFO[r].j ? `<p><span class="muted">巧记：</span>${h(RINFO[r].j)}</p>` : ''}</div>`).join('')}</div>
       <div class="row" style="justify-content:flex-start">
         <button class="btn red" data-a="start" data-i="${i}">${st ? '重新学习并闯关' : '学习并闯关'}</button>
         ${st ? `<button class="btn ghost" data-a="start" data-i="${i}" data-skip="1">直接闯关${st < 3 ? '，冲三星' : ''}</button>` : ''}
@@ -307,10 +361,10 @@
       <div class="row"><button class="btn red" data-a="boss" data-i="${c}">再考一次</button></div></div>`));
   }
   function codexList(kind, key) {
-    let ids, title, sub;
-    if (kind === 'r') { ids = W.map((w, i) => (w.r === key ? i : -1)).filter(i => i >= 0); title = key.replace(/,/g, ' / '); sub = ROOT[key]; }
+    let ids, title, sub, tip = '';
+    if (kind === 'r') { ids = W.map((w, i) => (w.r === key ? i : -1)).filter(i => i >= 0); title = rootName(key); sub = ROOT[key]; tip = RINFO[key].j; }
     else { const t = key.replace(/-/g, ''); ids = W.map((w, i) => (w.p.some(p => p.k === kind && p.t === t) ? i : -1)).filter(i => i >= 0); title = key; sub = (D.affixes[kind].find(x => x.t === t) || {}).g; }
-    openOverlay(sheet(`<div><span class="small muted">${KIND[kind]}，${ids.length} 个词</span><h1 class="bigword">${h(title)}</h1><p class="def">${h(sub || '')}</p></div>
+    openOverlay(sheet(`<div><span class="small muted">${KIND[kind]}，${ids.length} 个词</span><h1 class="bigword">${h(title)}</h1><p class="def">${h(sub || '')}</p>${tip ? `<p class="muted" style="margin-top:6px">巧记：${h(tip)}</p>` : ''}</div>
       <ul class="wl">${ids.map(i => `<li><b>${h(W[i].w)}</b><span>${h(W[i].d)}<br><span class="small muted">${W[i].p.map(p => h(p.t)).join(' + ')}</span></span></li>`).join('')}</ul>`));
   }
 
@@ -336,7 +390,7 @@
     step();
   }
   const startLevel = (i, skip) => begin('level', i, L[i].words, buildQuiz(L[i].words, L[i].roots), skip ? [] : L[i].words.slice());
-  function startBoss(c) { const ws = []; for (let i = c * CH; i < Math.min(L.length, c * CH + CH); i++) ws.push(...L[i].words); begin('boss', c, ws, mixedQuiz(pick(ws, 20)), []); }
+  function startBoss(c) { const ws = []; for (let i = CHS[c].a; i < CHS[c].b; i++) ws.push(...L[i].words); begin('boss', c, ws, mixedQuiz(pick(ws, 20)), []); }
   function startReview() { const ws = pick(Object.keys(P.wrong).map(Number).filter(i => W[i]), 12); if (ws.length) begin('review', 0, ws, mixedQuiz(ws), []); }
 
   function step() {
@@ -360,12 +414,13 @@
     ses.state = { t: 'learn', wi, opts, answered: false };
     $('#body').innerHTML = `<div class="learn" style="display:grid;gap:18px">
       <span class="phase">认识新词 <span class="num">${ses.li + 1}/${ses.learn.length}</span></span>
-      <div class="wordrow"><span class="bigword">${h(w.w)}</span>${sayBtn(w.w)}</div>
+      <div class="wordrow"><span class="bigword">${h(w.w)}</span>${sayBtn(w.w)}${meta(w)}</div>
       ${tiles(w)}
       <div id="guess"><p class="prompt" style="margin-bottom:10px">看拆解，猜猜它的意思</p>${optBtns(opts, '', id => W[id].d)}</div>
       <div id="reveal" hidden></div></div>`;
     speak(w.w);
   }
+  const meta = w => (w.ph || EXAM[w.lv]) ? `<span class="wmeta">${w.ph ? `<span class="ph">/${h(w.ph)}/</span>` : ''}${EXAM[w.lv] ? `<span class="exam">${EXAM[w.lv]}</span>` : ''}</span>` : '';
   function note(w) {
     return `<div class="note"><p class="def">${h(w.d)}</p>${w.s ? `<p class="story">记法：${h(w.s)}</p>` : ''}${w.e ? `<p class="ex">${h(w.e)}</p><p class="small muted">${h(w.z)}</p>` : ''}</div>`;
   }
@@ -376,7 +431,7 @@
     if (q.t === 'root') {
       const opts = shuffle([q.r, ...pick(D.roots.filter(r => r.m !== ROOT[q.r]).map(r => r.r), 3)]);
       ses.state = { t: 'opt', q, opts, ok: opts.indexOf(q.r) };
-      body.innerHTML = `${head}<p class="prompt">这个词根是什么意思？</p><div class="tiles"><span class="tile r" style="font-size:2rem;padding:12px 22px">${h(q.r.replace(/,/g, ' / '))}</span></div>${optBtns(opts, '', r => ROOT[r])}`;
+      body.innerHTML = `${head}<p class="prompt">这个词根是什么意思？</p><div class="tiles"><span class="tile r" style="font-size:2rem;padding:12px 22px">${h(rootName(q.r))}</span></div>${optBtns(opts, '', r => ROOT[r])}`;
     } else if (q.t === 'mean') {
       const opts = meaningOpts(q.w, 4);
       ses.state = { t: 'opt', q, opts, ok: opts.indexOf(q.w) };
@@ -424,7 +479,7 @@
       if (!q.retry) ses.queue.push(Object.assign({}, q, { retry: true }));
     }
     $('#combo').textContent = ses.combo >= 2 ? `连对 ×${ses.combo}` : '';
-    const detail = w ? `<div class="ans"><div class="wordrow" style="margin-bottom:8px"><b style="font:800 1.3rem var(--f-word)">${h(w.w)}</b>${sayBtn(w.w)}<span>${h(w.d)}</span></div>${tiles(w)}</div>` : `<div class="ans">${h(q.r.replace(/,/g, ' / '))}：${h(ROOT[q.r])}</div>`;
+    const detail = w ? `<div class="ans"><div class="wordrow" style="margin-bottom:8px"><b style="font:800 1.3rem var(--f-word)">${h(w.w)}</b>${sayBtn(w.w)}<span>${h(w.d)}</span></div>${tiles(w)}</div>` : `<div class="ans">${h(rootName(q.r))}：${h(ROOT[q.r])}${RINFO[q.r].j ? `<br><span class="small">巧记：${h(RINFO[q.r].j)}</span>` : ''}</div>`;
     $('#foot').innerHTML = `<div class="fb ${ok ? 'right' : 'wrong'}" role="status"><strong>${ok ? (ses.combo >= 3 ? `连对 ${ses.combo} 题` : '答对了') : shownWrong || '答错了，正确答案：'}</strong>${ok && !w ? '' : detail}</div><button class="btn block ${ok ? '' : 'red'}" data-a="next" id="nextBtn">继续</button>`;
     $('#nextBtn').focus({ preventScroll: true });
     if (w && ok && q.t !== 'mean') speak(w.w);

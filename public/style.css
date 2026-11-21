@@ -149,6 +149,15 @@ main { padding-block: 20px 64px; }
 .fb .tiles { justify-content: flex-start; }
 @keyframes shake { 25% { transform: translateX(-6px) } 75% { transform: translateX(6px) } }
 
+/* root mnemonics, word meta */
+.roots-info { display: grid; gap: 10px; }
+.root-card { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px; }
+.root-card p { font-size: .92rem; min-width: 0; }
+.wmeta { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ph { font-family: var(--f-word); color: var(--muted); }
+.exam { font-size: .75rem; font-weight: 700; color: var(--blue); background: var(--blue-soft); border-radius: 6px; padding: 1px 7px; }
+@media (max-width: 480px) { .root-card { grid-template-columns: 1fr; } .root-card .tile { justify-self: start; } }
+
 /* result */
 .result { text-align: center; display: grid; gap: 18px; justify-items: center; padding-top: 4vh; }
 .page-slot { width: min(70vw, 280px); aspect-ratio: 1; display: grid; place-items: center; background: var(--paper); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 16px;

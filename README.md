@@ -1,6 +1,6 @@
 # 词根驿站
 
-用词根、前缀、后缀拆解学习 2000 个英语单词的闯关网站（上册 a–n、下册 n–z 各 1000 词）。220 个词根站、22 个章节，通关盖站章，章节考验得章节印。
+用词根、前缀、后缀拆解学英语单词的闯关网站。314 个词根、4663 个单词，分成 554 个词根站、57 章；通关盖站章，章节考验得章节印。
 
 ## 运行
 
@@ -8,23 +8,55 @@
 node server.js
 ```
 
-打开 http://localhost:3000 。不需要安装任何依赖（Node 18 及以上）。
+打开 http://localhost:3000 。需要 Node 22.13 及以上（用到内置的 `node:sqlite`），不需要安装依赖。
 
 - `PORT`：端口，默认 3000
-- `DATA_DIR`：账号数据目录，默认 `./data`（账号和进度存在 `accounts.json`）
+- `DATA_DIR`：账号数据库所在目录，默认 `./data`
 
-## 结构
+## 数据
 
-- `server.js`：静态文件、注册/登录（scrypt 加盐哈希、HttpOnly 会话 Cookie、登录限速）、进度保存
-- `public/page.html`、`style.css`、`app.js`：界面和闯关逻辑
-- `public/stamps.js`：程序生成的站章和章节印（SVG）
-- `public/data.js`：题库（由 `tools/` 生成）
-- `tools/parse.js`、`tools/build.js`、`tools/combine.js`：把词根书的 OCR 文本解析成题库（上册必须排在前面，存档按关卡序号记录）
+所有数据都在 SQLite 里：
 
-没有后端时（直接把 `public/` 当静态站点托管），账号和进度会改存在浏览器本地。
+| 文件 | 内容 | 是否提交 |
+|---|---|---|
+| `data/lexicon.db` | 词库：词根、单词、词缀、关卡 | 提交（由脚本生成） |
+| `data/app.db` | 账号、登录会话、学习进度 | 不提交 |
+
+词库表结构（详见 `tools/build-db.js`）：
+
+- `roots`：词根（`key` 如 `cap,cip,cup`）、书中写法、含义、巧记、所属册
+- `words`：单词、词性、释义、音标、考试级别、记法、拆解词块（JSON）、例句
+- `word_roots`：单词与词根的多对多关系（少数单词同属两个词根）
+- `affixes`：前缀、后缀及释义
+- `levels` / `level_roots` / `level_words`：关卡划分
+
+重新生成词库：
+
+```bash
+node tools/build-db.js
+```
+
+它读取 `sources/` 下的源文件，写出 `data/lexicon.db`，再从数据库导出 `public/data.js`（给没有后端的静态托管用）。
+
+### 来源
+
+- `sources/vol1.md`：上册，161 个词根
+- `sources/vol2.md`：下册，57 个词根（结构化 JSON）
+- `sources/ocr-vol2-supplement.json`：下册其余 96 个词根，`vol2.md` 没有覆盖，取自早先对扫描版的 OCR 解析，质量低于前两者
+
+每个单词的拆解词块按这个顺序得出：书中的记法（如 `cap(抓)+able`）→ 由同词根里已拆解的单词推出（`in` + `capacity`）→ 在单词里找到词根，前后按常见词缀切分。
+
+## 接口
+
+- `GET /api/roots`：全部词根及单词数
+- `GET /api/words?root=act`：某个词根下的单词
+- `GET /api/words?q=spect`：按单词开头或释义搜索
+- `POST /api/register`、`POST /api/login`、`POST /api/logout`、`GET /api/me`、`PUT /api/progress`
+
+学习进度按关卡 key 和单词文本保存，重新生成词库后进度仍能对上；第一版（2000 词）的旧进度在登录时自动换算到新关卡。旧版的 `data/accounts.json` 会在首次启动时迁移进 `app.db`。
 
 ## 上线前
 
 - 放在 HTTPS 反向代理后面，并给 Cookie 加上 `Secure`
-- `accounts.json` 适合个人或小班使用；用户多了请换成数据库
+- 定期备份 `data/app.db`
 - 题库内容来自《图解词根、词源 10000 单词速记》，公开发布前请确认版权
