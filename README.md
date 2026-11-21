@@ -50,7 +50,7 @@ node tools/build-db.js
 - `GET /api/roots`：全部词根及单词数
 - `GET /api/words?root=act`：某个词根下的单词
 - `GET /api/words?q=spect`：按单词开头或释义搜索
-- `POST /api/register`、`POST /api/login`、`POST /api/logout`、`GET /api/me`、`PUT /api/progress`
+- `POST /api/email-code`（`purpose`：register / reset / bind）、`POST /api/register`、`POST /api/login`、`POST /api/reset-password`、`POST /api/bind-email`、`POST /api/logout`、`GET /api/me`、`PUT /api/progress`
 
 学习进度按关卡 key 和单词文本保存，重新生成词库后进度仍能对上；第一版（2000 词）和上一版（4663 词）的旧进度在登录时自动换算到新关卡（见 `data/legacy-*.json`）。旧版的 `data/accounts.json` 会在首次启动时迁移进 `app.db`。
 
@@ -75,12 +75,31 @@ docker compose up -d
 
 网站在服务器的 80 端口。要用 HTTPS，在前面放 Caddy 或 nginx 反向代理，并把 `docker-compose.yml` 里的 `TRUST_PROXY` 改成 `"1"`。在大陆用域名访问需要先备案。
 
+### 邮箱注册和发信
+
+用户用邮箱注册：填邮箱、收 6 位验证码、设昵称和密码。登录用邮箱和密码，忘记密码可以用邮箱验证码重设。早期用用户名注册的账号仍能用用户名登录，并可以在「我的」里绑定邮箱。
+
+验证码通过 SMTP 发出，需要一个发信邮箱：
+
+| 邮箱 | SMTP_HOST | 密码填什么 |
+|---|---|---|
+| QQ 邮箱 | `smtp.qq.com` | 邮箱设置里开启 SMTP 后生成的授权码 |
+| 163 邮箱 | `smtp.163.com` | 开启 SMTP 后生成的授权码 |
+| Gmail | `smtp.gmail.com` | 应用专用密码 |
+
+没有配置 SMTP 时，验证码不会真的发出，只打印在服务器日志里，方便本地测试。
+
+规则：验证码 10 分钟内有效，输错 5 次作废；同一邮箱 60 秒内只能发一次，同一网络每小时最多发 10 封；重设密码后其他设备上的登录会退出。
+
 ### 环境变量
 
 - `PORT`：端口，默认 3000
 - `DATA_DIR`：账号数据库目录，容器里是 `/data`
 - `TRUST_PROXY=1`：在 HTTPS 反向代理后面时开启，从代理头读取访问者 IP 和协议，登录 Cookie 会带上 `Secure`
 - `COOKIE_SECURE=1`：直接给 Cookie 加 `Secure`
+- `SMTP_HOST`、`SMTP_PORT`（默认 465）、`SMTP_USER`、`SMTP_PASS`：发验证码用的邮箱
+- `MAIL_FROM`：发件地址，默认同 `SMTP_USER`
+- `SMTP_SECURE=0`：用 587 或 25 端口时设置（服务器支持时会自动升级 STARTTLS）
 
 ## 上线前
 

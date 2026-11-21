@@ -50,7 +50,8 @@
     if (saved.v !== 2) return migrateV1(saved, p);
     const map = (from, to, idx, bin) => Object.entries(from || {}).forEach(([k, v]) => { const i = idx(k); if (i === undefined) orphan[bin][k] = v; else to[i] = v; });
     // stations whose contents changed in a word-list update: carry their stars over word by word
-    const moved = D.legacyStations || {}, best = new Map(), when = new Map();
+    // only saves written before stations carried a layout id use this table; newer saves already use current keys
+    const moved = saved.layout ? {} : D.legacyStations || {}, best = new Map(), when = new Map();
     const stars = {}, dates = {};
     for (const [k, v] of Object.entries(saved.stars || {})) {
       if (moved[k]) { moved[k].forEach(w => { best.set(w, Math.max(best.get(w) || 0, v)); if (saved.when && saved.when[k]) when.set(w, saved.when[k]); }); p.migrated = true; }
@@ -69,7 +70,7 @@
     return p;
   }
   function toSaved(p) {
-    const o = { v: 2, xp: p.xp, streak: p.streak, last: p.last, right: p.right, total: p.total, sound: p.sound, stars: { ...orphan.stars }, when: { ...orphan.when }, boss: { ...orphan.boss }, wrong: { ...orphan.wrong } };
+    const o = { v: 2, layout: D.layout, xp: p.xp, streak: p.streak, last: p.last, right: p.right, total: p.total, sound: p.sound, stars: { ...orphan.stars }, when: { ...orphan.when }, boss: { ...orphan.boss }, wrong: { ...orphan.wrong } };
     for (const i in p.stars) o.stars[L[i].k] = p.stars[i];
     for (const i in p.when) o.when[L[i].k] = p.when[i];
     for (const c in p.boss) o.boss[chKey(c)] = p.boss[c];
@@ -116,9 +117,13 @@
     const take = j => { user = j.user; P = normalize(j.progress); };
     if (first.user) take(first);
     return {
-      mode: 'server', note: '进度保存在你的账号里，换设备登录也能继续。',
-      register: async (u, p) => take(await api('register', 'POST', { username: u, password: p })),
-      login: async (u, p) => take(await api('login', 'POST', { username: u, password: p })),
+      mode: 'server', email: true, mailReady: !!(first.features && first.features.mailReady),
+      note: '进度保存在你的账号里，换设备登录也能继续。',
+      sendCode: (email, purpose) => api('email-code', 'POST', { email, purpose }),
+      register: async f => take(await api('register', 'POST', { email: f.email, code: f.code, name: f.name, password: f.password })),
+      login: async f => take(await api('login', 'POST', { account: f.account, password: f.password })),
+      reset: async f => take(await api('reset-password', 'POST', { email: f.email, code: f.code, password: f.password })),
+      bindEmail: async (email, code) => { const j = await api('bind-email', 'POST', { email, code }); user = j.user; },
       logout: () => api('logout', 'POST').catch(() => {}),
       save: p => api('progress', 'PUT', { progress: toSaved(p) }),
     };
@@ -133,7 +138,8 @@
     const k = LS.get('rq_session'); if (k && accounts()[k]) enter(accounts()[k]);
     return {
       mode: 'local', note: '账号和进度只保存在这台设备的这个浏览器里。',
-      async register(u, p) {
+      async register(f) {
+        const u = f.account, p = f.password;
         const name = u.trim(), key = name.toLowerCase(), all = accounts();
         if (!/^[\w一-龥]{2,16}$/.test(name)) throw new Error('用户名需为 2–16 位的中文、字母、数字或下划线');
         if (p.length < 6) throw new Error('密码至少 6 位');
@@ -143,7 +149,8 @@
         if (!LS.set('rq_accounts', all)) throw new Error('这个浏览器不允许保存数据，请关闭无痕模式后重试');
         enter(all[key]);
       },
-      async login(u, p) {
+      async login(f) {
+        const u = f.account, p = f.password;
         const rec = accounts()[u.trim().toLowerCase()];
         if (!rec || rec.hash !== await sha(rec.salt + p)) throw new Error('用户名或密码不正确');
         enter(rec);
@@ -239,18 +246,55 @@
         </div>
         <div class="demo-stamps" aria-hidden="true"><div>${s1}</div><div>${s2}</div></div>
       </div>
-      <div class="card"><form class="form" id="authForm" novalidate>
-        <div class="seg" role="group" aria-label="登录或注册">
-          <button type="button" data-a="authTab" data-v="login" aria-pressed="${authTab === 'login'}">登录</button>
-          <button type="button" data-a="authTab" data-v="register" aria-pressed="${authTab === 'register'}">注册</button>
-        </div>
-        <label for="au">用户名<input id="au" name="u" autocomplete="username" maxlength="16" required></label>
-        <label for="ap">密码<input id="ap" name="p" type="password" autocomplete="${authTab === 'login' ? 'current-password' : 'new-password'}" maxlength="72" required></label>
-        <p class="err" id="authErr" role="alert"></p>
-        <button class="btn red" id="authGo">${authTab === 'login' ? '登录并继续闯关' : '注册并开始闯关'}</button>
-        <p class="small muted">${h(store.note)}</p>
-      </form></div>
+      <div class="card">${authForm()}</div>
     </div>`;
+  }
+
+  // ---------- sign-in forms ----------
+  const field = (id, label, attrs) => `<label for="${id}">${label}<input id="${id}" ${attrs}></label>`;
+  const codeRow = () => `<div class="code-row">${field('ac', '验证码', 'inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" required')}<button type="button" class="btn ghost" data-a="sendCode" id="sendCode">发送验证码</button></div><p class="small muted" id="codeHint"></p>`;
+  function authForm() {
+    const email = store.email;
+    const tabs = [['login', '登录'], ['register', '注册']];
+    const head = authTab === 'reset'
+      ? '<div><h2 style="font-size:1.3rem">找回密码</h2><p class="small muted">输入注册时用的邮箱，收到验证码后设置新密码。</p></div>'
+      : `<div class="seg" role="group" aria-label="登录或注册">${tabs.map(([k, t]) => `<button type="button" data-a="authTab" data-v="${k}" aria-pressed="${authTab === k}">${t}</button>`).join('')}</div>`;
+    let fields;
+    if (!email) { // this browser only: plain username accounts
+      fields = field('aa', '用户名', 'autocomplete="username" maxlength="16" required') + field('ap', '密码', `type="password" autocomplete="${authTab === 'login' ? 'current-password' : 'new-password'}" maxlength="72" required`);
+    } else if (authTab === 'login') {
+      fields = field('aa', '邮箱', 'type="text" inputmode="email" autocomplete="username" maxlength="254" required placeholder="早期注册的账号也可以填用户名"') + field('ap', '密码', 'type="password" autocomplete="current-password" maxlength="72" required');
+    } else if (authTab === 'register') {
+      fields = field('ae', '邮箱', 'type="email" autocomplete="email" maxlength="254" required') + codeRow() + field('an', '昵称', 'autocomplete="nickname" maxlength="16" required') + field('ap', '密码', 'type="password" autocomplete="new-password" minlength="6" maxlength="72" required placeholder="至少 6 位"');
+    } else {
+      fields = field('ae', '邮箱', 'type="email" autocomplete="email" maxlength="254" required') + codeRow() + field('ap', '新密码', 'type="password" autocomplete="new-password" minlength="6" maxlength="72" required placeholder="至少 6 位"');
+    }
+    const go = { login: '登录并继续闯关', register: '注册并开始闯关', reset: '重设密码并登录' }[authTab];
+    const links = email ? (authTab === 'reset' ? '<button type="button" class="link" data-a="authTab" data-v="login">返回登录</button>' : authTab === 'login' ? '<button type="button" class="link" data-a="authTab" data-v="reset">忘记密码？</button>' : '') : '';
+    return `<form class="form" id="authForm" novalidate>${head}${fields}<p class="err" id="authErr" role="alert"></p>
+      <button class="btn red" id="authGo">${go}</button>${links ? `<div>${links}</div>` : ''}<p class="small muted">${h(store.note)}</p></form>`;
+  }
+  let codeTimer = null;
+  async function sendCode(purpose, emailId, btnId, hintId, errId) {
+    const email = $('#' + emailId).value.trim(), btn = $('#' + btnId), hint = $('#' + hintId), err = $('#' + errId);
+    err.textContent = '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { err.textContent = '请先填写正确的邮箱地址'; $('#' + emailId).focus(); return; }
+    btn.disabled = true;
+    try {
+      const j = await store.sendCode(email, purpose);
+      hint.textContent = j.mailReady ? `验证码已发到 ${email}，10 分钟内有效。没收到的话看看垃圾邮件。` : '测试模式：服务器还没配置发信，验证码打印在服务器日志里。';
+      let left = 60; btn.textContent = `${left} 秒后重发`;
+      clearInterval(codeTimer);
+      codeTimer = setInterval(() => { left--; if (!document.body.contains(btn)) return clearInterval(codeTimer); if (left <= 0) { clearInterval(codeTimer); btn.disabled = false; btn.textContent = '重新发送'; } else btn.textContent = `${left} 秒后重发`; }, 1000);
+      const code = $('#ac') || $('#bc'); if (code) code.focus();
+    } catch (ex) { err.textContent = ex.message === 'Failed to fetch' ? '连不上服务器，请检查网络后重试' : ex.message; btn.disabled = false; }
+  }
+  function bindSheet() {
+    openOverlay(sheet(`<form class="form" id="bindForm" novalidate><div><h2 style="font-size:1.3rem">绑定邮箱</h2><p class="small muted">绑定后可以用邮箱登录，忘记密码时也能用邮箱找回。</p></div>
+      ${field('be', '邮箱', 'type="email" autocomplete="email" maxlength="254" required')}
+      <div class="code-row">${field('bc', '验证码', 'inputmode="numeric" autocomplete="one-time-code" maxlength="6" required')}<button type="button" class="btn ghost" data-a="sendBindCode" id="sendBindCode">发送验证码</button></div><p class="small muted" id="bindHint"></p>
+      <p class="err" id="bindErr" role="alert"></p><button class="btn red" id="bindGo">绑定邮箱</button></form>`));
+    $('#be').focus();
   }
 
   // ---------- views ----------
@@ -339,6 +383,7 @@
       <div class="section-h"><h2>设置</h2></div>
       <div style="display:grid;gap:12px;justify-items:start">
         <button class="btn ghost" data-a="sound">音效：${P.sound ? '开' : '关'}</button>
+        ${store.email ? `<p>邮箱：${user.email ? h(user.email) : '<span class="muted">未绑定</span>'}</p>${user.email ? '' : '<button class="btn ghost" data-a="bind">绑定邮箱，用于登录和找回密码</button>'}` : ''}
         <p class="small muted">${h(store.note)}</p>
         ${store.logout ? '<button class="btn ghost" data-a="logout">退出登录</button>' : ''}
       </div>`;
@@ -545,7 +590,14 @@
   // ---------- events ----------
   const actions = {
     tab: el => { view = el.dataset.v; render(); window.scrollTo(0, 0); },
-    authTab: el => { authTab = el.dataset.v; const u = $('#au').value; renderAuth(); $('#au').value = u; },
+    authTab: el => {
+      const keep = ($('#ae') || $('#aa') || {}).value || '';
+      authTab = el.dataset.v; renderAuth();
+      const box = $('#ae') || $('#aa'); if (box) { box.value = authTab !== 'login' && !keep.includes('@') ? '' : keep; box.focus(); }
+    },
+    sendCode: () => sendCode(authTab === 'reset' ? 'reset' : 'register', 'ae', 'sendCode', 'codeHint', 'authErr'),
+    sendBindCode: () => sendCode('bind', 'be', 'sendBindCode', 'bindHint', 'bindErr'),
+    bind: bindSheet,
     ch: el => { const c = +el.dataset.i; if (el.getAttribute('aria-expanded') === 'true') { openCh.delete(c); el.parentNode.querySelector('.route')?.remove(); el.setAttribute('aria-expanded', 'false'); } else { openCh.add(c); render(); } },
     level: el => levelSheet(+el.dataset.i),
     boss: el => startBoss(+el.dataset.i),
@@ -595,12 +647,27 @@
   document.addEventListener('submit', async e => {
     e.preventDefault();
     if (e.target.id === 'spellForm') return actions.spellGo();
+    const netErr = ex => (ex.message === 'Failed to fetch' ? '连不上服务器，请检查网络后重试' : ex.message);
+    if (e.target.id === 'bindForm') {
+      const email = $('#be').value.trim(), code = $('#bc').value.trim(), err = $('#bindErr'), go = $('#bindGo');
+      if (!email || !code) { err.textContent = '请填写邮箱和验证码'; return; }
+      go.disabled = true; err.textContent = '';
+      try { await store.bindEmail(email, code); closeOverlay(); render(); toast('邮箱已绑定'); }
+      catch (ex) { err.textContent = netErr(ex); go.disabled = false; }
+      return;
+    }
     if (e.target.id !== 'authForm') return;
-    const u = $('#au').value.trim(), p = $('#ap').value, err = $('#authErr'), go = $('#authGo');
-    if (!u || !p) { err.textContent = '请填写用户名和密码'; return; }
+    const val = id => ($('#' + id) ? $('#' + id).value.trim() : '');
+    const f = { account: val('aa'), email: val('ae'), code: val('ac'), name: val('an'), password: $('#ap').value };
+    const err = $('#authErr'), go = $('#authGo');
+    const missing = authTab === 'login' ? (!f.account || !f.password) && '请填写账号和密码'
+      : !store.email ? (!f.account || !f.password) && '请填写用户名和密码'
+      : !f.email ? '请填写邮箱' : !/^\d{6}$/.test(f.code) ? '请填写邮件里的 6 位验证码'
+      : authTab === 'register' && !f.name ? '请填写昵称' : f.password.length < 6 ? '密码至少 6 位' : '';
+    if (missing) { err.textContent = missing; return; }
     go.disabled = true; err.textContent = '';
-    try { await store[authTab](u, p); view = 'map'; render(); }
-    catch (ex) { err.textContent = ex.message === 'Failed to fetch' ? '连不上服务器，请检查网络后重试' : ex.message; go.disabled = false; }
+    try { await store[authTab](f); view = 'map'; render(); if (authTab === 'reset') toast('密码已重设，其他设备上的登录已退出'); authTab = 'login'; }
+    catch (ex) { err.textContent = netErr(ex); go.disabled = false; }
   });
   document.addEventListener('keydown', e => {
     if (overlay.hidden || !ses || !ses.state || e.target.tagName === 'INPUT') return;

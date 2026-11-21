@@ -4,6 +4,7 @@ process.removeAllListeners('warning'); // node:sqlite prints an ExperimentalWarn
 const http = require('http'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { exportBundle, openLexicon } = require('./lib/lexicon');
+const { sendMail, mailConfigured } = require('./lib/mailer');
 
 const PORT = process.env.PORT || 3000;
 const PUB = path.join(__dirname, 'public');
@@ -46,8 +47,33 @@ CREATE TABLE IF NOT EXISTS progress (
   updated INTEGER NOT NULL
 );
 `);
+// Email sign-up (added later): an email column on users, and one pending code per address and purpose.
+if (!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'email'").get()) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email) WHERE email IS NOT NULL;
+CREATE TABLE IF NOT EXISTS email_codes (
+  email TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  expires INTEGER NOT NULL,
+  sent INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (email, purpose)
+);
+`);
 const Q = {
   userByKey: db.prepare('SELECT * FROM users WHERE name_key = ?'),
+  userById: db.prepare('SELECT id, name, email FROM users WHERE id = ?'),
+  userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
+  addEmailUser: db.prepare('INSERT INTO users (name, name_key, email, salt, hash, created) VALUES (?, ?, ?, ?, ?, ?)'),
+  setPassword: db.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?'),
+  setEmail: db.prepare('UPDATE users SET email = ? WHERE id = ?'),
+  dropUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ?'),
+  code: db.prepare('SELECT * FROM email_codes WHERE email = ? AND purpose = ?'),
+  putCode: db.prepare('INSERT INTO email_codes (email, purpose, code_hash, expires, sent, attempts) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(email, purpose) DO UPDATE SET code_hash = excluded.code_hash, expires = excluded.expires, sent = excluded.sent, attempts = 0'),
+  codeAttempt: db.prepare('UPDATE email_codes SET attempts = attempts + 1 WHERE email = ? AND purpose = ?'),
+  dropCode: db.prepare('DELETE FROM email_codes WHERE email = ? AND purpose = ?'),
+  dropOldCodes: db.prepare('DELETE FROM email_codes WHERE expires < ?'),
   addUser: db.prepare('INSERT INTO users (name, name_key, salt, hash, created) VALUES (?, ?, ?, ?, ?)'),
   addSession: db.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)'),
   session: db.prepare('SELECT s.token_hash, s.expires, u.id, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?'),
@@ -98,6 +124,23 @@ function readBody(req) {
     req.on('end', () => { try { ok(JSON.parse(b || '{}')); } catch (e) { bad(e); } });
   });
 }
+const publicUser = id => { const u = Q.userById.get(id); return { name: u.name, email: u.email || null }; };
+const normEmail = v => { const e = String(v || '').trim().toLowerCase(); return e.length <= 254 && /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/.test(e) ? e : null; };
+const codeHash = (email, code) => crypto.createHash('sha256').update(email + '|' + code).digest('hex');
+// Returns an error message, or null when the code is right (and then uses it up). Five wrong tries void the code.
+function checkCode(email, purpose, code) {
+  const row = Q.code.get(email, purpose);
+  if (!row || row.expires < Date.now()) return '验证码已过期，请重新获取';
+  if (row.attempts >= 5) return '验证码错误次数太多，请重新获取';
+  const given = codeHash(email, String(code || '').trim());
+  if (!crypto.timingSafeEqual(Buffer.from(given, 'hex'), Buffer.from(row.code_hash, 'hex'))) { Q.codeAttempt.run(email, purpose); return '验证码不正确'; }
+  Q.dropCode.run(email, purpose);
+  return null;
+}
+// at most 10 code emails per network address per hour
+const sends = new Map();
+function allowSend(ip) { const now = Date.now(), list = (sends.get(ip) || []).filter(t => now - t < 36e5); if (list.length >= 10) return false; list.push(now); sends.set(ip, list); return true; }
+
 // slow down password guessing: 8 failed tries per name+address per 10 minutes
 const fails = new Map();
 function tooMany(key) { const f = fails.get(key); return f && f.n >= 8 && Date.now() - f.t < 6e5; }
@@ -117,29 +160,101 @@ async function api(req, res, route, url) {
   }
 
   const me = currentUser(req);
+  const body = req.method === 'POST' ? await readBody(req) : {};
+  const ip = clientIp(req);
+
   if (route === 'me' && req.method === 'GET') {
-    return send(res, 200, me ? { user: { name: me.name }, progress: loadProgress(me.id) } : { user: null });
+    const features = { email: true, mailReady: mailConfigured() };
+    if (!me) return send(res, 200, { user: null, features });
+    return send(res, 200, { user: publicUser(me.id), progress: loadProgress(me.id), features });
   }
-  if ((route === 'register' || route === 'login') && req.method === 'POST') {
-    const { username, password } = await readBody(req);
-    const name = String(username || '').trim(), key = name.toLowerCase(), pw = String(password || '');
-    if (route === 'register') {
-      if (!/^[\w一-龥]{2,16}$/.test(name)) return send(res, 400, { error: '用户名需为 2–16 位的中文、字母、数字或下划线' });
-      if (pw.length < 6 || pw.length > 72) return send(res, 400, { error: '密码需为 6–72 位' });
-      if (Q.userByKey.get(key)) return send(res, 409, { error: '这个用户名已被注册，换一个试试' });
-      const salt = crypto.randomBytes(16).toString('hex');
-      const { lastInsertRowid } = Q.addUser.run(name, key, salt, hash(pw, salt), Date.now());
-      newSession(req, res, Number(lastInsertRowid));
-      return send(res, 200, { user: { name }, progress: null });
+
+  // 1. ask for a 6-digit code: purpose register | reset | bind
+  if (route === 'email-code' && req.method === 'POST') {
+    const email = normEmail(body.email), purpose = String(body.purpose || '');
+    if (!email) return send(res, 400, { error: '请填写正确的邮箱地址' });
+    if (!['register', 'reset', 'bind'].includes(purpose)) return send(res, 400, { error: '请求格式不正确' });
+    if (purpose === 'bind' && !me) return send(res, 401, { error: '登录已过期，请重新登录' });
+    const owner = Q.userByEmail.get(email);
+    if (purpose === 'register' && owner) return send(res, 409, { error: '这个邮箱已经注册过了，请直接登录' });
+    if (purpose === 'bind' && owner) return send(res, 409, { error: '这个邮箱已经被其他账号使用' });
+    const last = Q.code.get(email, purpose);
+    if (last && Date.now() - last.sent < 60e3) return send(res, 429, { error: `发送太频繁，请 ${Math.ceil((60e3 - (Date.now() - last.sent)) / 1000)} 秒后再试` });
+    if (!allowSend(ip)) return send(res, 429, { error: '这个网络发送验证码太多了，请一小时后再试' });
+    // For a reset to an unknown address, answer the same way but send nothing, so the form does not reveal who has an account.
+    if (purpose === 'reset' && !owner) return send(res, 200, { ok: true, mailReady: mailConfigured() });
+    const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
+    Q.putCode.run(email, purpose, codeHash(email, code), Date.now() + 10 * 60e3, Date.now());
+    const what = { register: '注册账号', reset: '重设密码', bind: '绑定邮箱' }[purpose];
+    try {
+      await sendMail({
+        to: email, subject: `词根驿站验证码 ${code}`,
+        text: `你正在${what}，验证码是 ${code}，10 分钟内有效。\n如果不是你本人操作，请忽略这封邮件。`,
+        html: `<div style="font-family:sans-serif;font-size:15px;line-height:1.7"><p>你正在${what}，验证码是：</p><p style="font-size:30px;font-weight:800;letter-spacing:6px;color:#CF3526">${code}</p><p>10 分钟内有效。如果不是你本人操作，请忽略这封邮件。</p><p style="color:#5C6780">词根驿站</p></div>`,
+      });
+    } catch (e) {
+      console.error('[mail] 发送失败：', e.message);
+      Q.dropCode.run(email, purpose);
+      return send(res, 502, { error: '验证码邮件没有发出去，请稍后再试' });
     }
-    const who = key + '|' + clientIp(req);
-    if (tooMany(who)) return send(res, 429, { error: '尝试次数过多，请 10 分钟后再试' });
-    const u = Q.userByKey.get(key);
-    const ok = u && crypto.timingSafeEqual(Buffer.from(hash(pw, u.salt), 'hex'), Buffer.from(u.hash, 'hex'));
-    if (!ok) { failed(who); return send(res, 401, { error: '用户名或密码不正确' }); }
-    newSession(req, res, u.id);
-    return send(res, 200, { user: { name: u.name }, progress: loadProgress(u.id) });
+    return send(res, 200, { ok: true, mailReady: mailConfigured() });
   }
+
+  // 2. register with email + code
+  if (route === 'register' && req.method === 'POST') {
+    const email = normEmail(body.email), name = String(body.name || '').trim(), pw = String(body.password || '');
+    if (!email) return send(res, 400, { error: '请填写正确的邮箱地址' });
+    if (!/^[\w一-龥·.\- ]{1,16}$/.test(name)) return send(res, 400, { error: '昵称需为 1–16 位的中文、字母、数字' });
+    if (pw.length < 6 || pw.length > 72) return send(res, 400, { error: '密码需为 6–72 位' });
+    if (Q.userByEmail.get(email)) return send(res, 409, { error: '这个邮箱已经注册过了，请直接登录' });
+    const bad = checkCode(email, 'register', body.code);
+    if (bad) return send(res, 400, { error: bad });
+    const salt = crypto.randomBytes(16).toString('hex');
+    const { lastInsertRowid } = Q.addEmailUser.run(name, '@' + email, email, salt, hash(pw, salt), Date.now());
+    newSession(req, res, Number(lastInsertRowid));
+    return send(res, 200, { user: publicUser(Number(lastInsertRowid)), progress: null });
+  }
+
+  // 3. log in with email, or with the username of an account made before email sign-up
+  if (route === 'login' && req.method === 'POST') {
+    const account = String(body.account || body.username || '').trim().toLowerCase(), pw = String(body.password || '');
+    const who = account + '|' + ip;
+    if (tooMany(who)) return send(res, 429, { error: '尝试次数过多，请 10 分钟后再试' });
+    const u = account.includes('@') ? Q.userByEmail.get(normEmail(account) || '') : Q.userByKey.get(account);
+    const ok = u && crypto.timingSafeEqual(Buffer.from(hash(pw, u.salt), 'hex'), Buffer.from(u.hash, 'hex'));
+    if (!ok) { failed(who); return send(res, 401, { error: '账号或密码不正确' }); }
+    newSession(req, res, u.id);
+    return send(res, 200, { user: publicUser(u.id), progress: loadProgress(u.id) });
+  }
+
+  // 4. forgotten password: email + code + new password; signs out every other device
+  if (route === 'reset-password' && req.method === 'POST') {
+    const email = normEmail(body.email), pw = String(body.password || '');
+    if (!email) return send(res, 400, { error: '请填写正确的邮箱地址' });
+    if (pw.length < 6 || pw.length > 72) return send(res, 400, { error: '新密码需为 6–72 位' });
+    const bad = checkCode(email, 'reset', body.code);
+    if (bad) return send(res, 400, { error: bad });
+    const u = Q.userByEmail.get(email);
+    if (!u) return send(res, 400, { error: '验证码不正确' });
+    const salt = crypto.randomBytes(16).toString('hex');
+    Q.setPassword.run(salt, hash(pw, salt), u.id);
+    Q.dropUserSessions.run(u.id);
+    newSession(req, res, u.id);
+    return send(res, 200, { user: publicUser(u.id), progress: loadProgress(u.id) });
+  }
+
+  // 5. accounts made with a username can add an email for email login and password reset
+  if (route === 'bind-email' && req.method === 'POST') {
+    if (!me) return send(res, 401, { error: '登录已过期，请重新登录' });
+    const email = normEmail(body.email);
+    if (!email) return send(res, 400, { error: '请填写正确的邮箱地址' });
+    if (Q.userByEmail.get(email)) return send(res, 409, { error: '这个邮箱已经被其他账号使用' });
+    const bad = checkCode(email, 'bind', body.code);
+    if (bad) return send(res, 400, { error: bad });
+    Q.setEmail.run(email, me.id);
+    return send(res, 200, { user: publicUser(me.id) });
+  }
+
   if (route === 'logout' && req.method === 'POST') {
     if (me) Q.dropSession.run(me.key);
     res.setHeader('Set-Cookie', cookie(req, '', 0));
@@ -179,9 +294,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': (TYPES[path.extname(file)] || 'application/octet-stream') + '; charset=utf-8' });
     res.end(buf);
   });
-}).listen(PORT, () => console.log(`词根驿站 running at http://localhost:${PORT}`));
+}).listen(PORT, () => {
+  console.log(`词根驿站 running at http://localhost:${PORT}`);
+  if (!mailConfigured()) console.log('提示：没有配置 SMTP，验证码不会真的发出，只会打印在这里。正式上线前请设置 SMTP_HOST 等环境变量。');
+});
 
 // Close cleanly when the platform stops or redeploys the service, so the account database is not left mid-write.
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { server.close(() => { db.close(); process.exit(0); }); setTimeout(() => process.exit(0), 5000).unref(); });
 
-setInterval(() => Q.dropExpired.run(Date.now()), 36e5).unref(); // drop expired sessions hourly
+setInterval(() => { Q.dropExpired.run(Date.now()); Q.dropOldCodes.run(Date.now()); }, 36e5).unref(); // drop expired sessions and codes hourly

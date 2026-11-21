@@ -75,6 +75,9 @@ main { padding-block: 20px 64px; }
 .seg { display: inline-flex; background: var(--paper-2); border-radius: 10px; padding: 4px; gap: 4px; }
 .seg button { padding: 6px 18px; border-radius: 8px; font-weight: 700; color: var(--muted); }
 .seg button[aria-pressed="true"] { background: var(--paper); color: var(--fg); box-shadow: var(--shadow); }
+.code-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+.code-row .btn { min-height: 48px; padding: 0 14px; white-space: nowrap; }
+.form .link { justify-self: start; }
 .err { color: var(--bad); font-weight: 600; min-height: 1.5em; font-size: .9rem; }
 
 /* morpheme tiles */

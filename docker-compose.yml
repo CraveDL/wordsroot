@@ -7,6 +7,12 @@ services:
       - "80:3000"
     environment:
       TRUST_PROXY: "0"
+      # mailbox that sends verification codes, e.g. smtp.qq.com with a QQ Mail authorization code
+      SMTP_HOST: ""
+      SMTP_PORT: "465"
+      SMTP_USER: ""
+      SMTP_PASS: ""
+
     volumes:
       - accounts:/data
 volumes:
