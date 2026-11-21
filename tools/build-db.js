@@ -2,8 +2,7 @@
 //   node tools/build-db.js
 // Sources, in priority order:
 //   sources/vol1.md                    上册，全部词根
-//   sources/vol2.md                    下册，结构化 JSON（只覆盖部分词根）
-//   sources/ocr-vol2-supplement.json   下册其余词根，来自早先的扫描版 OCR 解析
+//   sources/vol2.md                    下册，全部词根
 process.removeAllListeners('warning');
 const fs = require('fs');
 const path = require('path');
@@ -12,7 +11,6 @@ const { parseAll, tidy } = require('./parse-sources');
 
 const ROOT_DIR = path.join(__dirname, '..');
 const DB_FILE = path.join(ROOT_DIR, 'data', 'lexicon.db');
-const SUPPLEMENT = require('../sources/ocr-vol2-supplement.json');
 
 // Obvious spelling slips in the sources.
 const CORRECTIONS = { operatta: 'operetta', proprietory: 'proprietary' };
@@ -55,27 +53,10 @@ const cleanGloss = g => tidy(String(g || '')
 // ---------- 1. gather ----------
 const parsed = parseAll();
 const vol1Roots = parsed.roots.filter(r => r.volume === 1);
-const vol2Map = new Map(parsed.roots.filter(r => r.volume === 2).map(r => [r.key, r]));
-const supRoots = new Map(SUPPLEMENT.roots.map(r => [r.key, { key: r.key, display: r.display, variants: r.variants, meaning: r.meaning, mnemonic: '', volume: 2, source: 'ocr' }]));
-const roots = [...vol1Roots.map(r => Object.assign(r, { source: 'vol1' }))];
-for (const key of SUPPLEMENT.rootOrder) {
-  const r = vol2Map.get(key) ? Object.assign(vol2Map.get(key), { source: 'vol2' }) : supRoots.get(key);
-  if (r) roots.push(r);
-}
+const roots = parsed.roots.map(r => Object.assign(r, { source: r.volume === 1 ? 'vol1' : 'vol2' }));
 roots.forEach((r, i) => { r.seq = i + 1; });
 const rootByKey = new Map(roots.map(r => [r.key, r]));
-
-const rawWords = [
-  ...parsed.words.map(w => Object.assign(w, { source: w.volume === 1 ? 'vol1' : 'vol2' })),
-  ...SUPPLEMENT.words.map(w => {
-    const pm = w.meaning.match(/^([a-z./]+)\s/);
-    const head = w.parts.length > 1 ? w.parts.map(p => (p.g ? `${p.t}(${p.g})` : p.t)).join('+') : '';
-    let meaning = w.meaning.replace(/\s*注意.*$/, '').replace(/[；;，,\s]+$/, '');
-    const half = meaning.match(/^(.+?)\s+\1(?:；.*)?$/) || meaning.match(/^([a-z./]+\s.+?)\s+[a-z./]+\s.+$/);
-    if (half && meaning.split(/\s(?=[a-z]+\.)/).length === 2) { const [a, b] = meaning.split(/\s(?=[a-z]+\.)/); if (a.slice(0, 2) === b.slice(0, 2) && a.includes(b.split(' ').pop())) meaning = a; }
-    return { word: w.word, root: w.root, head: null, pos: pm ? pm[1] : '', meaning, phonetic: '', level: '', mnemonic: head && w.story ? `${head}→${w.story}` : head || w.story || '', example_en: w.example_en, example_cn: w.example_cn, volume: 2, source: 'ocr', presetParts: w.parts };
-  }),
-];
+const rawWords = parsed.words.map(w => Object.assign(w, { source: w.volume === 1 ? 'vol1' : 'vol2' }));
 
 // ---------- 2. one record per word; extra roots go to word_roots ----------
 const words = [], byWord = new Map(), extraRoots = [];
@@ -107,8 +88,19 @@ function fromMnemonic(w) {
   });
   if (!pieces.every(Boolean) || pieces.length > 6 || pieces.length < 2) return null;
   const word = w.word.toLowerCase();
-  const al = align(word, pieces.map(p => p.t));
-  if (!al || al.cost > Math.min(2, Math.floor(word.length / 4)) || !al.segs.every(s => s.length)) return null;
+  let al = align(word, pieces.map(p => p.t));
+  const ok = a => a && a.cost <= Math.min(2, Math.floor(word.length / 4)) && a.segs.every(s => s.length);
+  let tail = '';
+  if (!ok(al)) {
+    // the note may cover only the front of the word (sur+rog for surrogate): match a prefix, the rest becomes suffix tiles
+    al = null;
+    const len = pieces.reduce((n, p) => n + p.t.length, 0);
+    if (len >= 3 && len < word.length) for (const cut of [len, len - 1, len + 1]) {
+      const a = align(word.slice(0, cut), pieces.map(p => p.t));
+      if (a && a.cost === 0 && a.segs.every(s => s.length)) { al = a; tail = w.word.slice(cut); break; }
+    }
+    if (!al) return null;
+  }
   const vs = variantsOf(w.root);
   const parts = pieces.map((p, i) => {
     let k = 'x';
@@ -128,6 +120,7 @@ function fromMnemonic(w) {
     if (/连接/.test(p.g) || (p.t.length <= 1 && (i > 0 || !p.g))) { p.k = 'c'; return; }
     if (ri >= 0) p.k = i < ri ? 'p' : 's';
   });
+  if (tail) parts.push(...affixTiles(tail, 's'));
   const story = cut < 0 ? '' : tidy(mn.slice(cut).replace(/^→\s*/, ''));
   return { parts, story };
 }
@@ -136,7 +129,7 @@ const sliceStart = (segs, i) => segs.slice(0, i).reduce((n, s) => n + s.length, 
 // affix glossary (filled after the first pass)
 const gloss = { p: new Map(), s: new Map() };
 function addGloss(k, t, g) {
-  if (!g || /谐音|形似|联想|单词|读/.test(g) || g.length > 12) return;
+  if (!g || /谐音|形似|联想|单词|读|[A-Za-z]/.test(g) || g.length > 12) return;
   const m = gloss[k].get(t) || new Map();
   m.set(g, (m.get(g) || 0) + 1);
   gloss[k].set(t, m);
@@ -216,11 +209,6 @@ function fromRoot(w) {
 for (const w of words) {
   const r = fromMnemonic(w);
   if (r) { w.parts = r.parts; w.story = r.story; continue; }
-  if (w.presetParts && w.presetParts.length > 1) { // OCR supplement: tiles already worked out
-    w.parts = w.presetParts.map(p => ({ ...p, g: cleanGloss(p.g) }));
-    w.story = tidy(w.mnemonic.split('→').slice(1).join('→'));
-    continue;
-  }
   w.story = w.mnemonic || '';
 }
 for (const w of words) if (w.parts) w.parts.forEach(p => { if (p.k === 'p' || p.k === 's') addGloss(p.k, p.t.toLowerCase(), p.g); });
@@ -241,7 +229,7 @@ for (const w of words) if (!w.parts) { w.parts = fromRoot(w); w.derived = true; 
 for (const w of words) {
   const r = rootByKey.get(w.root);
   w.parts.forEach(p => {
-    if (p.k === 'r' && !p.g) p.g = r.meaning.split(/[，；]/)[0];
+    if (p.k === 'r' && !p.g) p.g = r.meaning.replace(/[（(].*?[）)]/g, '').split(/[，；、]/)[0];
     if ((p.k === 'p' || p.k === 's') && !p.g) p.g = bestGloss(p.k, p.t.toLowerCase());
   });
   if (w.parts.map(p => p.t).join('').toLowerCase() !== w.word.toLowerCase()) throw new Error('tiles do not spell ' + w.word + ': ' + JSON.stringify(w.parts));
@@ -295,7 +283,7 @@ CREATE TABLE roots (
   mnemonic TEXT NOT NULL DEFAULT '', -- 巧记
   volume INTEGER NOT NULL,           -- 1 上册, 2 下册
   seq INTEGER NOT NULL,
-  source TEXT NOT NULL               -- vol1 | vol2 | ocr
+  source TEXT NOT NULL               -- vol1 | vol2
 );
 CREATE TABLE words (
   id INTEGER PRIMARY KEY,
@@ -361,7 +349,7 @@ const js = exportBundle(DB_FILE);
 fs.writeFileSync(path.join(ROOT_DIR, 'public', 'data.js'), js);
 
 const count = (f, v) => words.filter(w => f(w) && (v == null || w.volume === v)).length;
-console.log(`roots ${roots.length} (上册 ${vol1Roots.length}, 下册 ${roots.length - vol1Roots.length}, of which OCR ${supRoots.size})`);
+console.log(`roots ${roots.length} (上册 ${vol1Roots.length}, 下册 ${roots.length - vol1Roots.length})`);
 console.log(`words ${words.length} (上册 ${count(() => true, 1)}, 下册 ${count(() => true, 2)}), extra root links ${extraRoots.length}`);
 console.log(`tiles from book ${count(w => !w.derived)}, derived from a relative ${count(w => w.derived && w.base)}, root only ${count(w => w.derived && !w.base && w.parts.length > 1)}, unsplit ${count(w => w.parts.length < 2)}`);
 console.log(`examples ${count(w => w.example_en)}, phonetics ${count(w => w.phonetic)}, exam tags ${count(w => w.level)}`);

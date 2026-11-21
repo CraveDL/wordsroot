@@ -1,6 +1,6 @@
 # 词根驿站
 
-用词根、前缀、后缀拆解学英语单词的闯关网站。314 个词根、4663 个单词，分成 554 个词根站、57 章；通关盖站章，章节考验得章节印。
+用词根、前缀、后缀拆解学英语单词的闯关网站。313 个词根、5769 个单词，分成 679 个词根站、69 章；通关盖站章，章节考验得章节印。
 
 ## 运行
 
@@ -40,9 +40,8 @@ node tools/build-db.js
 
 ### 来源
 
-- `sources/vol1.md`：上册，161 个词根
-- `sources/vol2.md`：下册，57 个词根（结构化 JSON）
-- `sources/ocr-vol2-supplement.json`：下册其余 96 个词根，`vol2.md` 没有覆盖，取自早先对扫描版的 OCR 解析，质量低于前两者
+- `sources/vol1.md`：上册，161 个词根（ac 到 norm）
+- `sources/vol2.md`：下册，152 个词根（not 到 zoo）
 
 每个单词的拆解词块按这个顺序得出：书中的记法（如 `cap(抓)+able`）→ 由同词根里已拆解的单词推出（`in` + `capacity`）→ 在单词里找到词根，前后按常见词缀切分。
 
@@ -53,7 +52,7 @@ node tools/build-db.js
 - `GET /api/words?q=spect`：按单词开头或释义搜索
 - `POST /api/register`、`POST /api/login`、`POST /api/logout`、`GET /api/me`、`PUT /api/progress`
 
-学习进度按关卡 key 和单词文本保存，重新生成词库后进度仍能对上；第一版（2000 词）的旧进度在登录时自动换算到新关卡。旧版的 `data/accounts.json` 会在首次启动时迁移进 `app.db`。
+学习进度按关卡 key 和单词文本保存，重新生成词库后进度仍能对上；第一版（2000 词）和上一版（4663 词）的旧进度在登录时自动换算到新关卡（见 `data/legacy-*.json`）。旧版的 `data/accounts.json` 会在首次启动时迁移进 `app.db`。
 
 ## 上线前
 

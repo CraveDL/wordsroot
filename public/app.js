@@ -10,7 +10,7 @@
   const CHS = [], chOf = [];
   STARTS.forEach((s, v) => { const end = STARTS[v + 1] ?? L.length; for (let a = s; a < end; a += 10) { const b = Math.min(end, a + 10); for (let i = a; i < b; i++) chOf[i] = CHS.length; CHS.push({ a, b, v: v + 1 }); } });
   const CHN = CHS.length;
-  const NAMES = ['初出茅庐', '小试牛刀', '渐入佳境', '势如破竹', '融会贯通', '游刃有余', '出类拔萃', '炉火纯青', '登堂入室', '登峰造极', '百尺竿头', '更上层楼', '乘风破浪', '厚积薄发', '触类旁通', '举一反三', '博闻强识', '学富五车', '妙笔生花', '出神入化', '循序渐进', '持之以恒', '锲而不舍', '水滴石穿', '聚沙成塔', '日积月累', '勤能补拙', '温故知新', '学以致用', '见微知著', '一目十行', '过目不忘', '博古通今', '才高八斗', '满腹经纶', '文思泉涌', '下笔成章', '口若悬河', '字字珠玑', '独占鳌头', '名列前茅', '鹏程万里', '青出于蓝', '一鸣惊人', '大显身手', '志存高远', '精益求精', '专心致志', '手不释卷', '孜孜不倦', '熟能生巧', '驾轻就熟', '得心应手', '胸有成竹', '闻鸡起舞', '囊萤映雪', '韦编三绝', '悬梁刺股', '凿壁偷光', '返璞归真'];
+  const NAMES = ['初出茅庐', '小试牛刀', '渐入佳境', '势如破竹', '融会贯通', '游刃有余', '出类拔萃', '炉火纯青', '登堂入室', '登峰造极', '百尺竿头', '更上层楼', '乘风破浪', '厚积薄发', '触类旁通', '举一反三', '博闻强识', '学富五车', '妙笔生花', '出神入化', '循序渐进', '持之以恒', '锲而不舍', '水滴石穿', '聚沙成塔', '日积月累', '勤能补拙', '温故知新', '学以致用', '见微知著', '一目十行', '过目不忘', '博古通今', '才高八斗', '满腹经纶', '文思泉涌', '下笔成章', '口若悬河', '字字珠玑', '独占鳌头', '名列前茅', '鹏程万里', '青出于蓝', '一鸣惊人', '大显身手', '志存高远', '精益求精', '专心致志', '手不释卷', '孜孜不倦', '熟能生巧', '驾轻就熟', '得心应手', '胸有成竹', '闻鸡起舞', '囊萤映雪', '韦编三绝', '悬梁刺股', '凿壁偷光', '一丝不苟', '废寝忘食', '笨鸟先飞', '积土成山', '只争朝夕', '奋发图强', '博采众长', '稳扎稳打', '心领神会', '豁然开朗', '返璞归真'];
   const CH_NAMES = CHS.map((_, c) => (c === CHN - 1 ? '万词归宗' : NAMES[c] || `第${c + 1}章`));
   const EXAM = { 初: '初中', 四: '四级', 六: '六级', 研: '考研', 托: '托福', G: 'GRE' };
   const WIDX = new Map(W.map((w, i) => [w.w.toLowerCase(), i]));
@@ -49,8 +49,20 @@
     for (const k of ['xp', 'streak', 'last', 'right', 'total', 'sound']) if (saved[k] !== undefined) p[k] = saved[k];
     if (saved.v !== 2) return migrateV1(saved, p);
     const map = (from, to, idx, bin) => Object.entries(from || {}).forEach(([k, v]) => { const i = idx(k); if (i === undefined) orphan[bin][k] = v; else to[i] = v; });
-    map(saved.stars, p.stars, k => LIDX.get(k), 'stars');
-    map(saved.when, p.when, k => LIDX.get(k), 'when');
+    // stations whose contents changed in a word-list update: carry their stars over word by word
+    const moved = D.legacyStations || {}, best = new Map(), when = new Map();
+    const stars = {}, dates = {};
+    for (const [k, v] of Object.entries(saved.stars || {})) {
+      if (moved[k]) { moved[k].forEach(w => { best.set(w, Math.max(best.get(w) || 0, v)); if (saved.when && saved.when[k]) when.set(w, saved.when[k]); }); p.migrated = true; }
+      else { stars[k] = v; if (saved.when && saved.when[k] !== undefined) dates[k] = saved.when[k]; }
+    }
+    map(stars, p.stars, k => LIDX.get(k), 'stars');
+    map(dates, p.when, k => LIDX.get(k), 'when');
+    if (best.size) L.forEach((l, i) => {
+      if (p.stars[i]) return;
+      const hit = l.words.map(wi => W[wi].w).filter(w => best.has(w));
+      if (hit.length && hit.length * 2 >= l.words.length) { p.stars[i] = Math.min(...hit.map(w => best.get(w))); p.when[i] = hit.map(w => when.get(w)).filter(Boolean).sort().pop() || day(); }
+    });
     const CIDX = new Map(CHS.map((_, c) => [chKey(c), c]));
     map(saved.boss, p.boss, k => CIDX.get(k), 'boss');
     map(saved.wrong, p.wrong, k => WIDX.get(k), 'wrong');

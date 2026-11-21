@@ -1,6 +1,6 @@
 // Read the two structured source files into one unified record shape.
 //   sources/vol1.md  上册: Markdown, "### N. 词根：x" sections with "* **word** [pos] 释义 ｜ **记**：… ｜ **例句**：en (zh)"
-//   sources/vol2.md  下册: a ```json block of [{root, meaning, mnemonic, words:[{word, level, phonetic, pos, cn, analysis, derivatives[], example_en, example_cn}]}]
+//   sources/vol2.md  下册: Markdown, "### N. 词根 x" sections with "* **word** [音标] *n.* 释义" lines and indented 【记】/【例句】
 // Output (returned, and written to data/lexicon.json when run directly):
 //   { roots: [{key, display, variants[], meaning, mnemonic, volume, seq}],
 //     words: [{word, root, head, pos, meaning, phonetic, level, mnemonic, example_en, example_cn, volume, seq}] }
@@ -93,43 +93,90 @@ function parseVol1Line(line, root, out) {
   for (const e of entries) out.push(Object.assign(e, { root: root.key, head: null, phonetic: '', level: '', volume: 1 }));
 }
 
-// ---------- 下册 (JSON) ----------
+// ---------- 下册 (Markdown, second layout) ----------
+// "### N. 词根 x" ; "* **含义**：" ; "* **词根巧记**：" (+ indented lines) ;
+// "  * **word** [phon] *n.* 释义 *v.* 释义（inline note）" — several words may share a line, split by "；**word**" ;
+// "    * 【记】…" and "    * 【例句】English.（中文。）" belong to the first word of the line above.
+function noteToMnemonic(note) {
+  // "pass通过 + port港口" -> "pass(通过)+port(港口)"; keeps any "→ …" tail
+  const cut = note.search(/→/);
+  const head = cut < 0 ? note : note.slice(0, cut);
+  if (!/\+/.test(head)) return note;
+  const pieces = head.split('+').map(x => x.trim()).filter(Boolean).map(x => {
+    const m = x.match(/^([A-Za-z]+)-?\s*(.*)$/);
+    return m ? (m[2] ? `${m[1]}(${m[2].trim()})` : m[1]) : null;
+  });
+  if (!pieces.every(Boolean)) return note;
+  return pieces.join('+') + (cut < 0 ? '' : note.slice(cut));
+}
 function parseVol2() {
-  const t = fs.readFileSync(path.join(SRC, 'vol2.md'), 'utf8');
-  const s = t.indexOf('```json') + 7;
-  const data = JSON.parse(t.slice(s, t.indexOf('```', s)));
+  const lines = fs.readFileSync(path.join(SRC, 'vol2.md'), 'utf8').split('\n');
   const roots = [], words = [];
-  const lv = x => (x && x !== '-' ? String(x).trim() : '');
-  for (const r of data) {
-    const variants = rootKey(r.root);
-    let key = variants.join(',');
-    const sense = (r.root.match(/[（(]\s*(\d)\s*[）)]/) || [])[1];
-    if (sense) key += '#' + sense; // pend,pens (1) and (2) are two different roots
-    const root = { key, display: r.root.trim(), variants, meaning: tidy(r.meaning), mnemonic: tidy(r.mnemonic), volume: 2, seq: roots.length + 1 };
-    roots.push(root);
-    for (const w of r.words) {
-      const p = normPos(w.pos || '');
-      words.push({
-        word: String(w.word).trim(), root: key, head: null, pos: p, meaning: tidy(`${p} ${w.cn}`),
-        phonetic: String(w.phonetic || '').replace(/^\[|\]$/g, '').trim(), level: lv(w.level),
-        mnemonic: tidy(w.analysis), example_en: String(w.example_en || '').trim(), example_cn: tidy(w.example_cn), volume: 2,
-      });
-      for (const d of w.derivatives || []) {
-        // "noted (a. 著名的 [初])"
-        const m = String(d).match(/^\s*([A-Za-z][A-Za-z' -]*?)\s*[（(]\s*(.*?)\s*[）)]\s*$/);
-        if (!m) continue;
-        let body = m[2], level = '';
-        const lm = body.match(/\s*\[([^\]]+)\]\s*$/);
-        if (lm) { level = lv(lm[1]); body = body.slice(0, lm.index); }
-        const pm = body.match(new RegExp('^(' + POS + '\\.(?:\\s*/\\s*' + POS + '\\.)?)\\s*(.*)$', 'i'));
-        const pos = pm ? normPos(pm[1]) : '';
-        const cn = pm ? pm[2] : body;
-        if (!zh(cn)) continue;
-        words.push({ word: m[1].trim(), root: key, head: String(w.word).trim(), pos, meaning: tidy(pos ? `${pos} ${cn}` : cn), phonetic: '', level, mnemonic: '', example_en: '', example_cn: '', volume: 2 });
+  let root = null, inTip = false, lineHead = null;
+  for (const raw of lines) {
+    const l = raw.trim();
+    let m;
+    if ((m = l.match(/^###\s*\d+\.\s*词根\s*(.+?)\s*$/))) {
+      const cont = /（续）|\(续\)/.test(m[1]);
+      const display = m[1].replace(/（续）|\(续\)/, '').trim();
+      inTip = false; lineHead = null;
+      if (cont && root && root.display === display) continue;
+      const variants = rootKey(display);
+      let key = variants.join(',');
+      const sense = (display.match(/[（(]\s*(\d)\s*[）)]/) || [])[1];
+      if (sense) key += '#' + sense; // pend, pens (1) and (2) are two different roots
+      root = { key, display, variants, meaning: '', mnemonic: '', volume: 2, seq: roots.length + 1 };
+      roots.push(root);
+      continue;
+    }
+    if (!root) continue;
+    if ((m = l.match(/^\*\s*\*\*含义\*\*[：:]\s*(.*)$/))) { root.meaning = tidy(m[1]); inTip = false; continue; }
+    if ((m = l.match(/^\*\s*\*\*(?:词根)?巧记\*\*[：:]\s*(.*)$/))) { root.mnemonic = tidy(m[1]); inTip = true; continue; }
+    if (/^\*\s*\*\*关联/.test(l)) { inTip = false; continue; }
+    if (inTip && /^\*\s+[^*【]/.test(l) && /^ {2}\*/.test(raw)) { root.mnemonic = tidy((root.mnemonic ? root.mnemonic + ' ' : '') + l.replace(/^\*\s*/, '')); continue; }
+    if ((m = l.match(/^\*\s*【记】\s*(.*)$/))) { if (lineHead && !lineHead.mnemonic) lineHead.mnemonic = tidy(m[1]); continue; }
+    if ((m = l.match(/^\*\s*【例句】\s*(.*)$/))) {
+      if (!lineHead) continue;
+      const mm = m[1].match(/^(.*?)\s*[（(]([^()（）]*[一-龥][^()（）]*)[）)]\s*$/);
+      if (mm) { lineHead.example_en = mm[1].trim(); lineHead.example_cn = tidy(mm[2]); }
+      continue;
+    }
+    if (!/^\*\s*\*\*[A-Za-z]/.test(l)) continue;
+    inTip = false;
+    lineHead = null;
+    for (const seg of l.replace(/^\*\s*/, '').split(/[；;]\s*(?=\*\*[A-Za-z])/)) {
+      for (const e of parseVol2Segment(seg, root)) {
+        words.push(e);
+        if (!lineHead) lineHead = e;
       }
     }
   }
   return { roots, words };
+}
+function parseVol2Segment(seg, root) {
+  // "**a** / **b** *v.* …" gives both words the same entry
+  const heads = [];
+  let rest = seg, m;
+  while ((m = rest.match(/^\s*(?:\/\s*)?\*\*([A-Za-z][A-Za-z' -]*?)\*\*\s*/))) { heads.push(m[1].trim()); rest = rest.slice(m[0].length); }
+  if (!heads.length) return [];
+  rest = rest.trim();
+  let phonetic = '', note = '';
+  const ph = rest.match(/^\[([^\]]*)\]\s*/);
+  if (ph) { phonetic = ph[1].trim(); rest = rest.slice(ph[0].length); }
+  const nt = rest.match(/\s*（([^（）]*(?:（[^（）]*）[^（）]*)*)）\s*$/);
+  if (nt) { note = nt[1].trim(); rest = rest.slice(0, nt.index); }
+  const blocks = [], posList = [];
+  const re = /\*([a-zA-Z./ ]+\.)\*\s*([^*]*)/g;
+  let pm;
+  while ((pm = re.exec(rest))) {
+    const p = normPos(pm[1]);
+    const cn = tidy(pm[2]).replace(/[；;，,]+$/, '');
+    posList.push(p);
+    blocks.push(cn ? `${p} ${cn}` : p);
+  }
+  const meaning = tidy(blocks.join(' '));
+  if (!zh(meaning)) return [];
+  return heads.map(word => ({ word, root: root.key, head: null, pos: [...new Set(posList)].join('/'), meaning, phonetic, level: '', mnemonic: note ? noteToMnemonic(tidy(note)) : '', example_en: '', example_cn: '', volume: 2 }));
 }
 
 function parseAll() {
