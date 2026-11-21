@@ -11,6 +11,11 @@ const LEXICON_DB = path.join(__dirname, 'data', 'lexicon.db');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const APP_DB = path.join(DATA_DIR, 'app.db');
 const SESSION_DAYS = 30;
+// Behind a hosting platform's HTTPS proxy (Render, a cloud load balancer, nginx): read the client address and scheme from its headers.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const clientIp = req => (TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress;
+const isHttps = req => process.env.COOKIE_SECURE === '1' || (TRUST_PROXY && req.headers['x-forwarded-proto'] === 'https');
+const cookie = (req, value, maxAge) => `rq_sid=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${isHttps(req) ? '; Secure' : ''}`;
 
 if (!fs.existsSync(LEXICON_DB)) { console.error('缺少词库 data/lexicon.db，请先运行 node tools/build-db.js'); process.exit(1); }
 const lexicon = openLexicon(LEXICON_DB);
@@ -71,10 +76,10 @@ if (fs.existsSync(OLD)) {
 
 const hash = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
 const tokenKey = t => crypto.createHash('sha256').update(t).digest('hex'); // only token hashes are stored
-function newSession(res, userId) {
+function newSession(req, res, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   Q.addSession.run(tokenKey(token), userId, Date.now() + SESSION_DAYS * 864e5);
-  res.setHeader('Set-Cookie', `rq_sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86400}`);
+  res.setHeader('Set-Cookie', cookie(req, token, SESSION_DAYS * 86400));
 }
 function currentUser(req) {
   const m = /(?:^|;\s*)rq_sid=([a-f0-9]{64})/.exec(req.headers.cookie || '');
@@ -124,20 +129,20 @@ async function api(req, res, route, url) {
       if (Q.userByKey.get(key)) return send(res, 409, { error: '这个用户名已被注册，换一个试试' });
       const salt = crypto.randomBytes(16).toString('hex');
       const { lastInsertRowid } = Q.addUser.run(name, key, salt, hash(pw, salt), Date.now());
-      newSession(res, Number(lastInsertRowid));
+      newSession(req, res, Number(lastInsertRowid));
       return send(res, 200, { user: { name }, progress: null });
     }
-    const who = key + '|' + req.socket.remoteAddress;
+    const who = key + '|' + clientIp(req);
     if (tooMany(who)) return send(res, 429, { error: '尝试次数过多，请 10 分钟后再试' });
     const u = Q.userByKey.get(key);
     const ok = u && crypto.timingSafeEqual(Buffer.from(hash(pw, u.salt), 'hex'), Buffer.from(u.hash, 'hex'));
     if (!ok) { failed(who); return send(res, 401, { error: '用户名或密码不正确' }); }
-    newSession(res, u.id);
+    newSession(req, res, u.id);
     return send(res, 200, { user: { name: u.name }, progress: loadProgress(u.id) });
   }
   if (route === 'logout' && req.method === 'POST') {
     if (me) Q.dropSession.run(me.key);
-    res.setHeader('Set-Cookie', 'rq_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+    res.setHeader('Set-Cookie', cookie(req, '', 0));
     return send(res, 200, { ok: true });
   }
   if (route === 'progress' && req.method === 'PUT') {
@@ -153,11 +158,12 @@ async function api(req, res, route, url) {
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
 const SHELL = body => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}[hidden]{display:none!important}</style></head><body>${body}</body></html>`;
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/api/')) {
     return api(req, res, url.pathname.slice(5), url).catch(() => send(res, 400, { error: '请求格式不正确' }));
   }
+  if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
   if (url.pathname === '/' || url.pathname === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(SHELL(fs.readFileSync(path.join(PUB, 'page.html'), 'utf8')));
@@ -174,5 +180,8 @@ http.createServer((req, res) => {
     res.end(buf);
   });
 }).listen(PORT, () => console.log(`词根驿站 running at http://localhost:${PORT}`));
+
+// Close cleanly when the platform stops or redeploys the service, so the account database is not left mid-write.
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { server.close(() => { db.close(); process.exit(0); }); setTimeout(() => process.exit(0), 5000).unref(); });
 
 setInterval(() => Q.dropExpired.run(Date.now()), 36e5).unref(); // drop expired sessions hourly

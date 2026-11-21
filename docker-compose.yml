@@ -1,0 +1,13 @@
+# On your own server:  docker compose up -d   (site on port 80; accounts kept in the "accounts" volume)
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:3000"
+    environment:
+      TRUST_PROXY: "0"
+    volumes:
+      - accounts:/data
+volumes:
+  accounts:

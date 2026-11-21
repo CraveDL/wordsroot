@@ -1,0 +1,18 @@
+# Render Blueprint: New > Blueprint, pick this repository.
+# Accounts live in SQLite on the persistent disk; disks need a paid instance (starter).
+services:
+  - type: web
+    name: wordsroot
+    runtime: docker
+    plan: starter
+    region: singapore
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: TRUST_PROXY
+        value: "1"
+    disk:
+      name: accounts
+      mountPath: /data
+      sizeGB: 1

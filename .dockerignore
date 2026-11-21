@@ -1,0 +1,7 @@
+.git
+node_modules
+sources
+tools
+data/app.db*
+data/accounts.json*
+*.md

@@ -54,8 +54,35 @@ node tools/build-db.js
 
 学习进度按关卡 key 和单词文本保存，重新生成词库后进度仍能对上；第一版（2000 词）和上一版（4663 词）的旧进度在登录时自动换算到新关卡（见 `data/legacy-*.json`）。旧版的 `data/accounts.json` 会在首次启动时迁移进 `app.db`。
 
+## 部署到公网
+
+仓库里已经带了 `Dockerfile`，任何能跑 Docker 的地方都能部署。账号数据库放在容器的 `/data` 目录，必须挂一块持久磁盘，否则重启后账号会清空。
+
+### 方式一：Render（海外，最省事）
+
+1. 打开 https://dashboard.render.com/blueprints ，点 **New Blueprint Instance**。
+2. 连接 GitHub，选这个仓库，Render 会读取 `render.yaml`，点 **Apply**。
+3. 几分钟后得到形如 `https://wordsroot.onrender.com` 的网址。
+
+`render.yaml` 用的是付费的 Starter 实例加 1GB 磁盘（约每月 7 美元多一点），因为免费实例不能挂磁盘。只想先试用的话，把 `plan` 改成 `free` 并删掉 `disk` 一段，但这样每次重启或重新部署后账号都会清空，而且 15 分钟没人访问就会休眠。
+
+### 方式二：自己的云服务器（中国大陆访问更快）
+
+```bash
+git clone https://github.com/CraveDL/wordsroot.git && cd wordsroot
+docker compose up -d
+```
+
+网站在服务器的 80 端口。要用 HTTPS，在前面放 Caddy 或 nginx 反向代理，并把 `docker-compose.yml` 里的 `TRUST_PROXY` 改成 `"1"`。在大陆用域名访问需要先备案。
+
+### 环境变量
+
+- `PORT`：端口，默认 3000
+- `DATA_DIR`：账号数据库目录，容器里是 `/data`
+- `TRUST_PROXY=1`：在 HTTPS 反向代理后面时开启，从代理头读取访问者 IP 和协议，登录 Cookie 会带上 `Secure`
+- `COOKIE_SECURE=1`：直接给 Cookie 加 `Secure`
+
 ## 上线前
 
-- 放在 HTTPS 反向代理后面，并给 Cookie 加上 `Secure`
-- 定期备份 `data/app.db`
+- 定期备份 `/data/app.db`
 - 题库内容来自《图解词根、词源 10000 单词速记》，公开发布前请确认版权
