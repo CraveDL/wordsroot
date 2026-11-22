@@ -38,7 +38,7 @@ export default function MorphHero({ D }) {
   }, { scope: ref, dependencies: [i] });
   if (!e) return null;
   return (
-    <div className="morph-stage" ref={ref} aria-label={`${e.w}：${e.p.map(p => p.t).join(' + ')}`}>
+    <div className="morph-stage" ref={ref} style={{ '--len': e.w.length, '--n': e.p.length }} aria-label={`${e.w}：${e.p.map(p => p.t).join(' + ')}`}>
       <div className="morph-word" key={i}>
         {e.p.map((p, n) => (
           <span key={n} className={`morph-piece ${p.k}`}>

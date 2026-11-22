@@ -12,19 +12,33 @@ import { StationSheet, Album, SealSheet, Codex, GroupSheet, Me, BindSheet } from
 import { pick } from './lib/quiz.js';
 
 const TABS = [['journey', '旅程'], ['album', '集章册'], ['codex', '图鉴'], ['me', '我的']];
+const ICONS = {
+  journey: <path d="M5 19c3-1 4-4 7-4s4 3 7 1M6 5.5a2 2 0 1 0 0 .01M18 12.5a2 2 0 1 0 0 .01M6 7.5c0 3 12 1 12 5" />,
+  album: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4.5" strokeDasharray="2 2" /></>,
+  codex: <path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5zM5 20.5A2.5 2.5 0 0 0 7.5 23H19M9 8h6M9 11.5h4" />,
+  me: <><circle cx="12" cy="8.5" r="3.5" /><path d="M5 20c1-3.5 4-5 7-5s6 1.5 7 5" /></>,
+};
 const TRIAL_PASS = 0.8;
 
 function Nav({ view, setView }) {
   const ref = useRef(null);
+  const [w, setW] = useState(0); // re-place the indicator when the layout switches between top tabs and bottom bar
+  useEffect(() => { const f = () => setW(innerWidth); addEventListener('resize', f); return () => removeEventListener('resize', f); }, []);
   useLayoutEffect(() => {
     const el = ref.current, cur = el.querySelector('[aria-current="page"]'), bar = el.querySelector('.bar');
     if (!cur) return;
-    const to = { x: cur.offsetLeft + 10, width: cur.offsetWidth - 20 };
+    const phone = matchMedia('(max-width: 640px)').matches;
+    const to = phone ? { x: cur.offsetLeft + cur.offsetWidth / 2 - 14, width: 28 } : { x: cur.offsetLeft + 10, width: cur.offsetWidth - 20 };
     if (reduced || !bar.dataset.ready) { gsap.set(bar, to); bar.dataset.ready = 1; } else gsap.to(bar, { ...to, duration: 0.45, ease: 'power3.out' });
-  }, [view]);
+  }, [view, w]);
   return (
     <nav className="nav" ref={ref} aria-label="主导航">
-      {TABS.map(([k, t]) => <button key={k} aria-current={view === k ? 'page' : undefined} onClick={() => setView(k)}>{t}</button>)}
+      {TABS.map(([k, t]) => (
+        <button key={k} aria-current={view === k ? 'page' : undefined} onClick={() => setView(k)}>
+          <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{ICONS[k]}</svg>
+          <span>{t}</span>
+        </button>
+      ))}
       <span className="bar" aria-hidden="true" />
     </nav>
   );

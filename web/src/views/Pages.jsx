@@ -25,7 +25,7 @@ export function StationSheet({ D, P, s, onClose, onStart }) {
         <SheetTop onClose={onClose}><span className={`badge ${s.c}`}>{TRACK[s.c].en} · 第 {s.no} 站</span></SheetTop>
         <div className="sheet-head">
           <div style={{ minWidth: 0 }}>
-            <SplitText text={gs.map(g => g.m).join('  ·  ')} tag="h1" className={`morph-big ${s.c}`} splitType="chars" delay={30} duration={0.7} textAlign="left" threshold={0} rootMargin="0px" />
+            <SplitText text={gs.map(g => g.m).join('  ·  ')} tag="h1" className={`morph-big ${s.c} ${gs.map(g => g.m).join('  ·  ').length > 14 ? 'long' : ''}`} splitType="chars" delay={30} duration={0.7} textAlign="left" threshold={0} rootMargin="0px" />
           </div>
           {st && <div className="mini"><StationStamp D={D} s={s} stars={st} date={P.when[s.k]} rough /></div>}
         </div>
@@ -145,7 +145,7 @@ export function GroupSheet({ D, gi, onClose }) {
     <Overlay onClose={onClose} label={g.m}>
       <div className="sheet">
         <SheetTop onClose={onClose}><span className={`badge ${g.c}`}>{TRACK[g.c].en} · {KIND[g.c]}</span></SheetTop>
-        <h1 className={`morph-big ${g.c}`}>{g.m}</h1>
+        <h1 className={`morph-big ${g.c} ${g.m.length > 14 ? 'long' : ''}`}>{g.m}</h1>
         <div className="g-card">
           {g.en && <span className="en">= {g.en}</span>}
           <span className="zh">{g.zh}</span>

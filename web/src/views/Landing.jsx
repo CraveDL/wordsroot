@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { gsap, useGSAP, ScrollTrigger, reduced } from '../lib/fx.js';
 import { TRACKS } from '../lib/data.js';
 import { day } from '../lib/progress.js';
@@ -49,6 +49,13 @@ export default function Landing({ D, store, onSignedIn }) {
     });
   }, { scope: ref });
 
+  // phones: a fixed "sign up" bar while the form is off screen
+  const [formSeen, setFormSeen] = useState(false);
+  useEffect(() => {
+    const io = new IntersectionObserver(([en]) => setFormSeen(en.isIntersecting), { threshold: 0.15 });
+    if (formRef.current) io.observe(formRef.current);
+    return () => io.disconnect();
+  }, []);
   const goForm = t => { setTab(t); formRef.current?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' }); };
 
   return (
@@ -130,6 +137,10 @@ export default function Landing({ D, store, onSignedIn }) {
           </div>
         </section>
       )}
+      <div className={`m-cta ${formSeen ? 'hide' : ''}`} aria-hidden={formSeen}>
+        <button className="btn red block" tabIndex={formSeen ? -1 : 0} onClick={() => goForm('register')}>注册，开始闯关</button>
+        <button className="btn ghost" tabIndex={formSeen ? -1 : 0} onClick={() => goForm('login')}>登录</button>
+      </div>
       <footer className="wrap l-foot">词库来自《词根词缀》整理表，共 {D.entries.length} 个词条。</footer>
     </div>
   );

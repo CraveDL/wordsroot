@@ -17,7 +17,8 @@ function Route({ D, P, ch, onStation, onTrial }) {
     return () => ro.disconnect();
   }, []);
   const list = ch.stations;
-  const pts = list.map((s, i) => ({ x: XS[i % 4] * w, y: ROW / 2 + i * ROW }));
+  const narrow = w < 520;
+  const pts = list.map((s, i) => ({ x: narrow ? 40 + [0, 30, 60, 30][i % 4] : XS[i % 4] * w, y: ROW / 2 + i * ROW }));
   const d = pts.map((p, i) => {
     if (!i) return `M${p.x} ${p.y}`;
     const a = pts[i - 1];
@@ -47,14 +48,14 @@ function Route({ D, P, ch, onStation, onTrial }) {
       )}
       {w > 0 && list.map((s, i) => {
         const st = P.stars[s.k], open = isOpen(D, P, s), now = open && !st;
-        const p = pts[i], left = p.x > w / 2;
+        const p = pts[i], left = !narrow && p.x > w / 2;
         return (
           <div key={s.k}>
             <button className={`stop ${now ? 'now' : ''}`} style={{ left: p.x, top: p.y }} disabled={!open} onClick={() => onStation(s)} aria-label={`第 ${s.no} 站 ${stationLabel(D, s)}${st ? `，${st} 星` : open ? '' : '，未解锁'}`}>
               {now && <span className="pulse" />}
               {st ? <StationStamp D={D} s={s} stars={st} date={P.when[s.k]} /> : <span className="dot">{s.no}</span>}
             </button>
-            <div className={`stop-label ${left ? 'left' : ''} ${open ? '' : 'locked'}`} style={left ? { right: w - p.x + 40, top: p.y } : { left: p.x + 40, top: p.y }} aria-hidden="true">
+            <div className={`stop-label ${left ? 'left' : ''} ${open ? '' : 'locked'}`} style={left ? { right: w - p.x + 40, top: p.y } : { left: p.x + 40, top: p.y, maxWidth: narrow ? w - p.x - 44 : undefined }} aria-hidden="true">
               <b>{stationLabel(D, s)}</b>
               <span>{stationMeaning(D, s)} · {s.e.length} 词</span>
               {st ? <span className="stars">{'★'.repeat(st)}<em>{'★'.repeat(3 - st)}</em></span> : now ? <span style={{ color: 'var(--k)', fontWeight: 700 }}>下一站</span> : null}
