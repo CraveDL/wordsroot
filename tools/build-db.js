@@ -1,27 +1,19 @@
-// Build the word database (data/lexicon.db) from the source files, then export public/data.js for static hosting.
+// Build the word database (data/lexicon.db) from sources/lexicon.xlsx, then export public/data.json for the site.
 //   node tools/build-db.js
-// Sources, in priority order:
-//   sources/vol1.md                    上册，全部词根
-//   sources/vol2.md                    下册，全部词根
+// The spreadsheet's 词条 sheet has one row per word in a word-formation group (前缀 / 后缀 / 词根):
+//   序号, 类别, 构词分组, 分义, 单词, 音标, 原书星级, 词性及释义, 构词记忆, 例句及译文, 用法搭配, 词源故事, 词义溯源, 引申路径（记忆法）
 process.removeAllListeners('warning');
 const fs = require('fs');
 const path = require('path');
+const XLSX = require('xlsx');
 const { DatabaseSync } = require('node:sqlite');
-const { parseAll, tidy } = require('./parse-sources');
 
 const ROOT_DIR = path.join(__dirname, '..');
+const SRC = path.join(ROOT_DIR, 'sources', 'lexicon.xlsx');
 const DB_FILE = path.join(ROOT_DIR, 'data', 'lexicon.db');
+const CAT = { 前缀: 'p', 后缀: 's', 词根: 'r' };
 
-// Obvious spelling slips in the sources.
-const CORRECTIONS = { operatta: 'operetta', proprietory: 'proprietary' };
-
-// Fallback glosses for affixes the book never glosses explicitly.
-const BUILTIN = {
-  p: { un: '不', in: '不；向内', im: '不；向内', il: '不', ir: '不', dis: '不；分开', non: '非', mis: '错误', re: '再；回', de: '去掉；向下', pre: '提前', pro: '向前', ex: '出', e: '出', con: '共同', com: '共同', co: '共同', sub: '下面', super: '超过', sur: '超过', inter: '之间', trans: '穿过', anti: '反对', counter: '反', over: '过度', under: '下面', out: '超过', semi: '半', multi: '多', auto: '自己', tele: '远', micro: '小', ab: '离开', abs: '离开', ad: '去；强调', ac: '强调', af: '强调', ag: '强调', al: '强调', an: '强调', ap: '强调', ar: '强调', as: '强调', at: '强调', col: '共同', cor: '共同', ob: '反；对着', oc: '强调', of: '反', op: '反', sup: '下面', suf: '下面', sug: '下面', sus: '下面', di: '分开', dif: '分开', se: '分开', en: '使', em: '使', per: '贯穿；完全', post: '后', fore: '前', mal: '坏', bi: '二', tri: '三', uni: '单一', self: '自我' },
-  s: { tion: '名词后缀', ion: '名词后缀', ation: '名词后缀', ment: '名词后缀', ness: '名词后缀', ity: '名词后缀', ty: '名词后缀', ance: '名词后缀', ence: '名词后缀', ancy: '名词后缀', ency: '名词后缀', ure: '名词后缀', ism: '主义', ist: '人', er: '人；物', or: '人；物', ee: '被……的人', ant: '……的；人', ent: '……的', ive: '形容词后缀', ous: '形容词后缀', ious: '形容词后缀', al: '形容词后缀', ial: '形容词后缀', ic: '形容词后缀', ical: '形容词后缀', ary: '形容词后缀', ory: '形容词后缀', able: '能……的', ible: '能……的', ful: '充满……的', less: '无……的', ly: '副词后缀', ize: '动词后缀', ise: '动词后缀', ify: '动词后缀', fy: '动词后缀', ate: '动词后缀', en: '使', ing: '动名词', ed: '……的', s: '复数', y: '名词后缀', ship: '名词后缀', hood: '名词后缀', dom: '名词后缀', some: '……的', ish: '……的' },
-};
-
-// ---------- helpers ----------
+const clean = s => String(s ?? '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
 const zh = s => /[一-龥]/.test(s || '');
 const lev = (a, b) => {
   const d = [...Array(a.length + 1)].map((_, i) => [i]);
@@ -29,7 +21,7 @@ const lev = (a, b) => {
   for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] !== b[j - 1]));
   return d[a.length][b.length];
 };
-// Split `word` into parts.length contiguous segments, closest to the given spellings.
+// split `word` into parts.length contiguous segments closest to the given spellings
 function align(word, parts) {
   const k = parts.length, n = word.length, INF = 1e9;
   if (k > n) return null;
@@ -45,313 +37,305 @@ function align(word, parts) {
   for (let i = k; i >= 1; i--) { segs.unshift(word.slice(bk[i][e], e)); e = bk[i][e]; }
   return { cost: dp[k][n], segs };
 }
-const cleanGloss = g => tidy(String(g || '')
-  .replace(/(名词|动词|形容词|副词)?(前缀|后缀)[：:]?/, (m, a) => (a ? a + '后缀 ' : ''))
-  .replace(/庙缀/g, '后缀').replace(/表示?/g, '').replace(/[“”"]/g, '').replace(/拼音[：:]?/, '谐音 ').replace(/连接字母/, '连接')
-  .replace(/^[：:\s]+|[：:\s]+$/g, ''));
 
-// ---------- 1. gather ----------
-const parsed = parseAll();
-const vol1Roots = parsed.roots.filter(r => r.volume === 1);
-const roots = parsed.roots.map(r => Object.assign(r, { source: r.volume === 1 ? 'vol1' : 'vol2' }));
-roots.forEach((r, i) => { r.seq = i + 1; });
-const rootByKey = new Map(roots.map(r => [r.key, r]));
-const rawWords = parsed.words.map(w => Object.assign(w, { source: w.volume === 1 ? 'vol1' : 'vol2' }));
+// ---------- 1. read the workbook ----------
+const wb = XLSX.readFile(SRC);
+const sheetRows = name => XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null }).slice(1);
+const rows = sheetRows('词条').filter(r => r[4]);
+const exampleRows = sheetRows('例句');
+const examplesById = new Map();
+for (const r of exampleRows) if (r[0] != null && r[2]) { const id = Number(r[0]); if (!examplesById.has(id)) examplesById.set(id, { en: clean(r[2]), zh: clean(r[3]) }); }
 
-// ---------- 2. one record per word; extra roots go to word_roots ----------
-const words = [], byWord = new Map(), extraRoots = [];
-for (const w of rawWords) {
-  w.word = CORRECTIONS[w.word.toLowerCase()] || w.word;
-  if (!/^[A-Za-z][A-Za-z' -]*[A-Za-z]$/.test(w.word) || !zh(w.meaning) || !rootByKey.has(w.root)) continue;
-  const k = w.word.toLowerCase();
-  const prev = byWord.get(k);
-  if (prev) {
-    if (prev.root !== w.root) extraRoots.push([k, w.root]);
-    // keep the richer entry's fields
-    for (const f of ['mnemonic', 'example_en', 'example_cn', 'phonetic', 'level']) if (!prev[f] && w[f]) { prev[f] = w[f]; if (f === 'example_en') prev.example_cn = w.example_cn; }
-    continue;
+// ---------- 2. groups: "12. agr(i), agr(o)=field, land 表示“田地”，引申为“农业”" ----------
+const quoted = s => { const m = String(s || '').match(/“([^”]+)”/); return m ? m[1] : ''; };
+function parseHeader(header, cat) {
+  // normalise full-width brackets and equals signs, drop "(=dis-)" style notes, join "magn(i) -"
+  let h = clean(header).replace(/（/g, '(').replace(/）/g, ')').replace(/＝/g, '=').replace(/\(=[^)]*\)/g, '').replace(/\s+-/g, '-').replace(/\//g, ', ');
+  const notes = [];
+  h = h.replace(/\(([^)]*[\u4e00-\u9fa5][^)]*)\)/g, (m, x) => { notes.push(x); return ''; }); // "(在同辅音词根前)" is a note, not a spelling
+  const m = h.match(/^(\d+)\.\s*(.*)$/);
+  const num = m ? Number(m[1]) : 0;
+  let rest = m ? m[2] : h;
+  // morpheme list: letters, hyphens, brackets, commas, spaces — up to "=", "表" or the first Chinese character
+  const cut = rest.search(/=|表|等|[一-龥“]/);
+  const morphText = (cut < 0 ? rest : rest.slice(0, cut)).replace(/[,，\s]+$/, '').trim();
+  rest = cut < 0 ? '' : rest.slice(cut);
+  let en = '';
+  if (rest.startsWith('=')) { const e = rest.slice(1).search(/表|[一-龥“]/); en = clean(e < 0 ? rest.slice(1) : rest.slice(1, e + 1)); rest = e < 0 ? '' : rest.slice(e + 1); }
+  const desc = clean([rest, ...notes.map(n => `（${n}）`)].join(' '));
+  const forms = morphText.split(/[,，]/).map(x => x.trim()).filter(Boolean);
+  const variants = [];
+  for (const f of forms) {
+    const bare = f.replace(/-/g, '').toLowerCase();
+    const o = bare.match(/^([a-z]+)\(([a-z]+)\)([a-z]*)$/); // acr(o) -> acr, acro
+    if (o) { variants.push(o[1] + o[3], o[1] + o[2] + o[3]); continue; }
+    if (/^[a-z]+$/.test(bare)) variants.push(bare);
   }
-  byWord.set(k, w);
-  words.push(w);
+  let short = quoted(desc);
+  if (!short && desc) short = desc.replace(/^表示?/, '').split(/[，,；;]/)[0];
+  if (!short && cat === 's' && /表(名词|形容词|动词|副词)/.test(desc)) short = desc.match(/表(名词|形容词|动词|副词)/)[1] + '后缀';
+  return { num, display: morphText, variants: [...new Set(variants)], en, desc, short: clean(short) };
+}
+function parseSense(text) {
+  const t = clean(text);
+  const en = (t.match(/=([^表一-龥“]+)/) || [])[1] || '';
+  let short = quoted(t);
+  if (!short) short = t.replace(/^[①-⑳]\s*/, '').replace(/^表示?/, '').split(/[，,；;]/)[0];
+  return { text: t, en: clean(en), short: clean(short) };
 }
 
-// ---------- 3. morpheme tiles ----------
-const variantsOf = key => rootByKey.get(key).variants.slice().sort((a, b) => b.length - a.length);
-function fromMnemonic(w) {
-  const mn = (w.mnemonic || '').replace(/^(拆|联想|读|记)[：:]\s*/, '');
-  const cut = mn.search(/→/);
-  const head = (cut < 0 ? mn : mn.slice(0, cut)).replace(/十/g, '+').replace(/\^/g, '');
-  if (!/\+/.test(head)) return null;
-  const pieces = head.split('+').map(s => s.trim()).filter(Boolean).map(s => {
-    const m = s.match(/^([A-Za-z-]+)\s*(?:[（(](.*?)[）)]?)?\s*$/);
-    return m ? { t: m[1].toLowerCase().replace(/-/g, ''), g: m[2] || '' } : null;
-  });
-  if (!pieces.every(Boolean) || pieces.length > 6 || pieces.length < 2) return null;
-  const word = w.word.toLowerCase();
-  let al = align(word, pieces.map(p => p.t));
-  const ok = a => a && a.cost <= Math.min(2, Math.floor(word.length / 4)) && a.segs.every(s => s.length);
-  let tail = '';
-  if (!ok(al)) {
-    // the note may cover only the front of the word (sur+rog for surrogate): match a prefix, the rest becomes suffix tiles
-    al = null;
-    const len = pieces.reduce((n, p) => n + p.t.length, 0);
-    if (len >= 3 && len < word.length) for (const cut of [len, len - 1, len + 1]) {
-      const a = align(word.slice(0, cut), pieces.map(p => p.t));
-      if (a && a.cost === 0 && a.segs.every(s => s.length)) { al = a; tail = w.word.slice(cut); break; }
-    }
-    if (!al) return null;
+const groups = [], groupByKey = new Map();
+for (const r of rows) {
+  const cat = CAT[clean(r[1])];
+  const key = cat + '|' + clean(r[2]);
+  let g = groupByKey.get(key);
+  if (!g) {
+    g = Object.assign(parseHeader(r[2], cat), { cat, header: clean(r[2]), senses: [], senseIndex: new Map(), entries: [] });
+    groupByKey.set(key, g); groups.push(g);
   }
-  const vs = variantsOf(w.root);
-  const parts = pieces.map((p, i) => {
-    let k = 'x';
-    if (/前缀/.test(p.g)) k = 'p'; else if (/后缀/.test(p.g)) k = 's';
-    const at = sliceStart(al.segs, i);
-    return { t: w.word.slice(at, at + al.segs[i].length), g: cleanGloss(p.g), k };
-  });
-  let ri = parts.findIndex(p => p.k === 'x' && vs.some(v => p.t.toLowerCase() === v || (p.t.toLowerCase().startsWith(v) && p.t.length <= v.length + 2)));
-  if (ri < 0) ri = parts.findIndex(p => p.k === 'x' && vs.some(v => p.t.toLowerCase().includes(v)));
-  if (ri < 0) { // spelled differently in the book (ecut for secut): fall back to the piece glossed with the root's meaning
-    const rm = new Set([...rootByKey.get(w.root).meaning].filter(c => /[\u4e00-\u9fa5]/.test(c)));
-    ri = parts.findIndex(p => p.k === 'x' && p.t.length >= 2 && [...p.g].some(c => rm.has(c)));
-  }
-  if (ri >= 0) parts[ri].k = 'r';
-  parts.forEach((p, i) => {
-    if (p.k !== 'x') return;
-    if (/连接/.test(p.g) || (p.t.length <= 1 && (i > 0 || !p.g))) { p.k = 'c'; return; }
-    if (ri >= 0) p.k = i < ri ? 'p' : 's';
-  });
-  if (tail) parts.push(...affixTiles(tail, 's'));
-  const story = cut < 0 ? '' : tidy(mn.slice(cut).replace(/^→\s*/, ''));
-  return { parts, story };
+  const senseText = clean(r[3]);
+  if (senseText && !g.senseIndex.has(senseText)) { g.senseIndex.set(senseText, g.senses.length); g.senses.push(parseSense(senseText)); }
 }
-const sliceStart = (segs, i) => segs.slice(0, i).reduce((n, s) => n + s.length, 0);
+for (const g of groups) if ((!g.short || g.short.startsWith('（')) && g.senses.length) g.short = g.senses.map(s => s.short).filter(Boolean).join('；');
 
-// affix glossary (filled after the first pass)
-const gloss = { p: new Map(), s: new Map() };
-function addGloss(k, t, g) {
-  if (!g || /谐音|形似|联想|单词|读|[A-Za-z]/.test(g) || g.length > 12) return;
-  const m = gloss[k].get(t) || new Map();
-  m.set(g, (m.get(g) || 0) + 1);
-  gloss[k].set(t, m);
+// morpheme dictionaries from the group headers, for classifying the pieces of a breakdown
+const dict = { p: new Map(), s: new Map(), r: new Map() };
+for (const g of groups) for (const v of g.variants) if (!dict[g.cat].has(v)) dict[g.cat].set(v, g.short || g.senses.map(s => s.short).join('；'));
+
+// ---------- 3. entries and their tiles ----------
+// a tile only has room for the first sense: "做，造成，使；具有…的" -> "做，造成，使"
+const brief = g => { const x = String(g || '').split(/[；;]/)[0].trim(); return x.length > 10 ? x.split(/[，,]/)[0] : x; };
+const tidyGloss = g => clean(String(g || '').replace(/^=\s*/, '同 ').replace(/^表示?/, '').replace(/[“”"]/g, ''));
+function morphFits(piece, variants) {
+  return variants.some(v => piece === v || (piece.startsWith(v) && piece.length <= v.length + 2) || (v.startsWith(piece) && piece.length >= 2 && v.length <= piece.length + 1));
 }
-const bestGloss = (k, t) => {
-  const m = gloss[k].get(t);
-  if (m) return [...m.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  return BUILTIN[k][t] || '';
-};
-const known = k => new Set([...Object.keys(BUILTIN[k]), ...[...gloss[k].entries()].filter(([, m]) => [...m.values()].reduce((a, b) => a + b, 0) >= 2).map(([t]) => t)]);
-// split a stretch of letters into known affixes (prefixes left-to-right, suffixes right-to-left); one plain tile if that fails
-function affixTiles(seg, k) {
+// split letters into known prefixes (left to right) or suffixes (right to left); one tile when that fails
+function affixTiles(seg, kind) {
   if (!seg) return [];
-  const set = known(k), lower = seg.toLowerCase();
-  const memo = new Map();
-  const go = s => {
-    if (!s) return [];
-    if (memo.has(s)) return memo.get(s);
+  const set = dict[kind], s = seg.toLowerCase(), memo = new Map();
+  const go = x => {
+    if (!x) return [];
+    if (memo.has(x)) return memo.get(x);
     let best = null;
-    for (let n = Math.min(s.length, 7); n >= 1; n--) {
-      const piece = k === 'p' ? s.slice(0, n) : s.slice(s.length - n);
-      if (!set.has(piece) || (piece.length === 1 && s.length > 1 && k === 'p')) continue;
-      const rest = go(k === 'p' ? s.slice(n) : s.slice(0, s.length - n));
-      if (rest) { best = k === 'p' ? [piece, ...rest] : [...rest, piece]; break; }
+    for (let n = Math.min(x.length, 8); n >= 2; n--) {
+      const piece = kind === 'p' ? x.slice(0, n) : x.slice(x.length - n);
+      if (!set.has(piece)) continue;
+      const rest = go(kind === 'p' ? x.slice(n) : x.slice(0, x.length - n));
+      if (rest) { best = kind === 'p' ? [piece, ...rest] : [...rest, piece]; break; }
     }
-    memo.set(s, best);
+    memo.set(x, best);
     return best;
   };
-  const split = go(lower);
-  let at = 0;
-  if (split && split.length <= 3) return split.map(t => { const o = seg.slice(at, at + t.length); at += t.length; return { t: o, g: bestGloss(k, t), k: t.length === 1 && !bestGloss(k, t) ? 'c' : k }; });
-  return [{ t: seg, g: bestGloss(k, lower), k }];
+  const split = go(s);
+  if (split && split.length <= 3) { let at = 0; return split.map(t => { const o = seg.slice(at, at + t.length); at += t.length; return { t: o, g: dict[kind].get(t) || '', k: kind }; }); }
+  return [{ t: seg, g: dict[kind].get(s) || '', k: seg.length <= 1 ? 'c' : kind }];
 }
-// derive from another analysed word of the same root: in+capacity, captivat+ion
-function fromBase(w, analysed) {
-  const word = w.word, lower = word.toLowerCase();
-  let best = null;
-  for (const b of analysed) {
-    if (b === w || b.root !== w.root || !b.parts || b.parts.length < 2) continue;
-    const bw = b.word.toLowerCase();
-    if (bw.length < 4 || bw.length >= lower.length) continue;
-    const stems = [bw];
-    if (/e$/.test(bw)) stems.push(bw.slice(0, -1));
-    if (/y$/.test(bw)) stems.push(bw.slice(0, -1) + 'i', bw.slice(0, -1));
-    for (const st of stems) {
-      const i = lower.indexOf(st);
-      if (i < 0 || i > 6 || lower.length - i - st.length > 9) continue;
-      if (!best || st.length > best.st.length) best = { b, st, i };
-      break;
-    }
-  }
-  if (!best) return null;
-  const { b, st, i } = best;
-  let cut = b.word.length - st.length;
-  const core = b.parts.map(p => ({ ...p }));
-  while (cut > 0 && core.length) {
-    const last = core[core.length - 1];
-    const take = Math.min(cut, last.t.length);
-    last.t = last.t.slice(0, last.t.length - take); cut -= take;
-    if (!last.t) core.pop();
-  }
-  // re-case to this word's spelling
-  let at = i;
-  core.forEach(p => { p.t = word.slice(at, at + p.t.length); at += p.t.length; });
-  const parts = [...affixTiles(word.slice(0, i), 'p'), ...core, ...affixTiles(word.slice(i + st.length), 's')];
-  return { parts, base: b.word };
-}
-function fromRoot(w) {
-  const lower = w.word.toLowerCase();
-  const v = variantsOf(w.root).find(v => lower.includes(v));
-  if (!v) return [{ t: w.word, g: '', k: 'x' }];
-  const i = lower.indexOf(v);
-  return [...affixTiles(w.word.slice(0, i), 'p'), { t: w.word.slice(i, i + v.length), g: '', k: 'r' }, ...affixTiles(w.word.slice(i + v.length), 's')];
-}
-
-// pass 1: the book's own breakdowns
-for (const w of words) {
-  const r = fromMnemonic(w);
-  if (r) { w.parts = r.parts; w.story = r.story; continue; }
-  w.story = w.mnemonic || '';
-}
-for (const w of words) if (w.parts) w.parts.forEach(p => { if (p.k === 'p' || p.k === 's') addGloss(p.k, p.t.toLowerCase(), p.g); });
-// pass 2: derive from analysed relatives, repeating so chains (capture -> recapture) resolve
-for (let round = 0; round < 3; round++) {
-  const analysed = words.filter(w => w.parts && w.parts.length > 1);
-  let changed = 0;
-  for (const w of words) {
-    if (w.parts) continue;
-    const r = fromBase(w, analysed);
-    if (r) { w.parts = r.parts; w.base = r.base; w.derived = true; changed++; }
-  }
-  if (!changed) break;
-}
-// pass 3: locate the root inside the word
-for (const w of words) if (!w.parts) { w.parts = fromRoot(w); w.derived = true; }
-// fill the root tile's meaning and check the tiles spell the word
-for (const w of words) {
-  const r = rootByKey.get(w.root);
-  w.parts.forEach(p => {
-    if (p.k === 'r' && !p.g) p.g = r.meaning.replace(/[（(].*?[）)]/g, '').split(/[，；、]/)[0];
-    if ((p.k === 'p' || p.k === 's') && !p.g) p.g = bestGloss(p.k, p.t.toLowerCase());
+function tilesFromMnemonic(word, mnemonic, g, focusGloss) {
+  const head = mnemonic.split('→')[0];
+  if (!/[＋+]/.test(head)) return null;
+  const pieces = head.split(/[＋+]/).map(x => x.trim().replace(/^\(([a-z]+)\)/, '')).filter(Boolean).map(x => { // "(s)pect": the word drops the s
+    const m = x.match(/^([A-Za-z-]+(?:\([a-z]+\))?)\s*(?:[（(]([^）)]*)[）)])?\s*$/);
+    return m ? { t: m[1].replace(/\(([a-z]+)\)/, '$1').replace(/-/g, '').toLowerCase(), g: m[2] || '' } : null;
   });
-  if (w.parts.map(p => p.t).join('').toLowerCase() !== w.word.toLowerCase()) throw new Error('tiles do not spell ' + w.word + ': ' + JSON.stringify(w.parts));
+  if (!pieces.every(Boolean) || pieces.length < 2 || pieces.length > 7) return null;
+  const lower = word.toLowerCase();
+  const al = align(lower, pieces.map(p => p.t));
+  if (!al || al.cost > Math.min(2, Math.floor(lower.length / 4)) || !al.segs.every(Boolean)) return null;
+  let at = 0;
+  const tiles = pieces.map((p, i) => { const t = word.slice(at, at + al.segs[i].length); at += al.segs[i].length; return { t, g: tidyGloss(p.g), k: '', low: al.segs[i] }; });
+  // the group's own morpheme: prefixes look from the front, suffixes from the back
+  const order = tiles.map((_, i) => i);
+  if (g.cat === 's') order.reverse();
+  let fi = order.find(i => morphFits(tiles[i].low, g.variants) || morphFits(pieces[i].t, g.variants));
+  if (fi === undefined && g.cat === 'r') fi = order.find(i => g.variants.some(v => tiles[i].low.includes(v)));
+  // the book wrote a variant spelling of the morpheme, "bull（=ball）" or "ceil（=cel）"
+  if (fi === undefined) fi = order.find(i => /^=/.test(pieces[i].g.trim()));
+  if (fi === undefined && g.cat === 'p') fi = 0;
+  if (fi === undefined && g.cat === 's') fi = tiles.length - 1;
+  if (fi === undefined) { let best = -1; tiles.forEach((t, i) => { if (!dict.p.has(t.low) && !dict.s.has(t.low) && (best < 0 || t.low.length > tiles[best].low.length)) best = i; }); if (best >= 0) fi = best; }
+  if (fi !== undefined) { tiles[fi].k = g.cat; tiles[fi].f = 1; if (!tiles[fi].g) tiles[fi].g = focusGloss; }
+  const rootAt = tiles.findIndex(t => t.k === 'r');
+  tiles.forEach((t, i) => {
+    if (t.k) return;
+    const low = t.low;
+    if (/连接|无义/.test(t.g) || (low.length <= 1 && !t.g)) { t.k = 'c'; return; }
+    const beforeCore = rootAt < 0 ? i < tiles.length - 1 : i < rootAt;
+    if (beforeCore && dict.p.has(low)) { t.k = 'p'; if (!t.g) t.g = dict.p.get(low); return; }
+    if (!beforeCore && i > 0 && dict.s.has(low)) { t.k = 's'; if (!t.g) t.g = dict.s.get(low); return; }
+    if (dict.r.has(low) && low.length >= 2) { t.k = 'r'; if (!t.g) t.g = dict.r.get(low); return; }
+    if (i === tiles.length - 1 && i > 0 && dict.s.has(low)) { t.k = 's'; if (!t.g) t.g = dict.s.get(low); return; }
+    t.k = 'b'; // a whole word or stem the book builds on, e.g. moral in a+moral
+  });
+  return tiles.map(({ t, g, k, f }) => (f ? { t, g: brief(g), k, f } : { t, g: brief(g), k }));
 }
-
-// ---------- 4. stations: one or more neighbouring roots, 8–12 words each ----------
-const wordsByRoot = new Map();
-words.forEach((w, i) => { if (!wordsByRoot.has(w.root)) wordsByRoot.set(w.root, []); wordsByRoot.get(w.root).push(i); });
-const levels = [], starts = [];
-for (const vol of [1, 2]) {
-  starts.push(levels.length);
-  let buf = { roots: [], words: [] };
-  const flush = () => { if (buf.words.length) { levels.push(buf); buf = { roots: [], words: [] }; } };
-  for (const r of roots.filter(r => r.volume === vol)) {
-    const ws = wordsByRoot.get(r.key);
-    if (!ws) continue;
-    if (ws.length >= 13) {
-      flush();
-      const k = Math.ceil(ws.length / 10), size = Math.ceil(ws.length / k);
-      for (let i = 0, n = 1; i < ws.length; i += size, n++) levels.push({ roots: [r.key], words: ws.slice(i, i + size), part: n, of: k });
-      continue;
-    }
-    if (buf.words.length + ws.length > 12) flush();
-    buf.roots.push(r.key); buf.words.push(...ws);
-    if (buf.words.length >= 8) flush();
+function tilesFromGroup(word, g, focusGloss) {
+  const lower = word.toLowerCase();
+  const vs = g.variants.slice().sort((a, b) => b.length - a.length);
+  let i = -1, v = '';
+  if (g.cat === 'p') { v = vs.find(x => lower.startsWith(x)) || ''; i = v ? 0 : -1; }
+  else if (g.cat === 's') { v = vs.find(x => lower.endsWith(x)) || ''; i = v ? lower.length - v.length : -1; }
+  else { v = vs.find(x => lower.includes(x)) || ''; i = v ? lower.indexOf(v) : -1; }
+  if (i < 0) return [{ t: word, g: '', k: 'b' }];
+  const before = word.slice(0, i), core = word.slice(i, i + v.length), after = word.slice(i + v.length);
+  const pre = g.cat === 'p' ? [] : affixTiles(before, 'p').map(t => (t.k === 'p' && !dict.p.has(t.t.toLowerCase()) ? { ...t, k: 'b' } : t));
+  const post = g.cat === 's' ? [] : affixTiles(after, 's').map(t => (t.k === 's' && !dict.s.has(t.t.toLowerCase()) ? { ...t, k: 'b' } : t));
+  if (g.cat === 'p' && after) post.push(...(dict.s.size ? affixTilesTail(after) : [{ t: after, g: '', k: 'b' }]));
+  if (g.cat === 's' && before) pre.push({ t: before, g: '', k: 'b' });
+  return [...pre, { t: core, g: focusGloss, k: g.cat, f: 1 }, ...post].map(x => ({ ...x, g: brief(x.g) }));
+}
+// after a prefix: a stem, possibly with known suffixes on its end (re + act + ion)
+function affixTilesTail(seg) {
+  const low = seg.toLowerCase();
+  for (const sfx of [...dict.s.keys()].sort((a, b) => b.length - a.length)) {
+    if (sfx.length >= 2 && low.endsWith(sfx) && low.length - sfx.length >= 3) return [{ t: seg.slice(0, seg.length - sfx.length), g: dict.r.get(low.slice(0, low.length - sfx.length)) || '', k: dict.r.has(low.slice(0, low.length - sfx.length)) ? 'r' : 'b' }, { t: seg.slice(seg.length - sfx.length), g: dict.s.get(sfx), k: 's' }];
   }
-  flush();
+  return [{ t: seg, g: dict.r.get(low) || '', k: dict.r.has(low) ? 'r' : 'b' }];
 }
-// fold very small stations into the one before when the result stays short
-for (let i = levels.length - 1; i > 0; i--) {
-  const a = levels[i - 1], b = levels[i];
-  if (starts.includes(i) || b.words.length >= 6 || a.words.length + b.words.length > 14 || a.of || b.of) continue;
-  a.roots.push(...b.roots.filter(r => !a.roots.includes(r))); a.words.push(...b.words); levels.splice(i, 1);
-  for (let s = 0; s < starts.length; s++) if (starts[s] > i) starts[s]--;
-}
-levels.forEach(l => { l.key = l.roots.join('+') + (l.of ? '~' + l.part : ''); });
 
-// ---------- 5. write SQLite ----------
+const entries = [];
+let fromBook = 0;
+for (const r of rows) {
+  const g = groupByKey.get(CAT[clean(r[1])] + '|' + clean(r[2]));
+  const word = clean(r[4]).replace(/[（(][a-z]+[）)]$/, ''); // distil（l） -> distil
+  if (!/^\p{L}[\p{L}' .-]*$/u.test(word)) continue;
+  const senseText = clean(r[3]);
+  const si = senseText ? g.senseIndex.get(senseText) : -1;
+  const focusGloss = si >= 0 ? g.senses[si].short : g.short;
+  const mnemonic = clean(r[8]);
+  let tiles = mnemonic ? tilesFromMnemonic(word, mnemonic, g, focusGloss) : null;
+  const fromMn = Boolean(tiles && tiles.some(t => t.f));
+  if (fromMn) fromBook++; else tiles = tilesFromGroup(word, g, focusGloss);
+  const ex = examplesById.get(Number(r[0]));
+  const story = clean(r[13]) || (mnemonic.includes('→') ? clean(mnemonic.slice(mnemonic.indexOf('→') + 1)) : '');
+  const e = {
+    id: Number(r[0]), word, phonetic: clean(r[5]), stars: (String(r[6] || '').match(/★/g) || []).length || 1,
+    meaning: clean(r[7]), mnemonic, story, tiles, fromMn, sense: si,
+    example_en: ex ? ex.en : '', example_cn: ex ? ex.zh : '',
+    usage: clean(r[10]), etymology: clean(r[11]), origin: clean(r[12]), group: g,
+  };
+  entries.push(e);
+  g.entries.push(e);
+}
+
+// ---------- 4. stations: a group (or one sense of a big group); very small neighbouring groups share a station ----------
+const stations = [];
+for (const cat of ['p', 's', 'r']) {
+  const pieces = [];
+  for (const g of groups.filter(x => x.cat === cat)) {
+    const es = g.entries;
+    if (!es.length) continue;
+    if (es.length <= 14) { pieces.push({ groups: [g], entries: es }); continue; }
+    const bySense = g.senses.length > 1 ? g.senses.map((_, i) => es.filter(e => e.sense === i)).concat([es.filter(e => e.sense < 0)]).filter(x => x.length) : [es];
+    const chunks = [];
+    for (const part of bySense) {
+      const k = Math.ceil(part.length / 12), size = Math.ceil(part.length / k);
+      for (let i = 0; i < part.length; i += size) chunks.push(part.slice(i, i + size));
+    }
+    chunks.forEach((c, i) => pieces.push({ groups: [g], entries: c, part: i + 1, of: chunks.length }));
+  }
+  // merge runs of tiny single-group pieces
+  const merged = [];
+  for (const p of pieces) {
+    const last = merged[merged.length - 1];
+    if (last && !last.of && !p.of && last.entries.length < 5 && p.entries.length < 5 && last.groups.length < 3 && last.entries.length + p.entries.length <= 10) {
+      last.groups.push(...p.groups); last.entries = [...last.entries, ...p.entries];
+    } else merged.push({ ...p });
+  }
+  merged.forEach(p => {
+    p.cat = cat;
+    p.key = cat + ':' + p.groups.map(g => g.num).join('+') + (p.of ? '~' + p.part : '');
+    stations.push(p);
+  });
+}
+
+// ---------- 5. SQLite ----------
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 for (const f of [DB_FILE, DB_FILE + '-wal', DB_FILE + '-shm']) fs.rmSync(f, { force: true });
 const db = new DatabaseSync(DB_FILE);
 db.exec(`
 PRAGMA journal_mode = DELETE;
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE roots (
+CREATE TABLE groups (
   id INTEGER PRIMARY KEY,
-  key TEXT NOT NULL UNIQUE,          -- variants joined by commas, e.g. "cap,cip,cup"
-  display TEXT NOT NULL,             -- as printed in the book, e.g. "cap, cip, cup"
-  variants TEXT NOT NULL,            -- JSON array
-  meaning TEXT NOT NULL,             -- 含义
-  mnemonic TEXT NOT NULL DEFAULT '', -- 巧记
-  volume INTEGER NOT NULL,           -- 1 上册, 2 下册
-  seq INTEGER NOT NULL,
-  source TEXT NOT NULL               -- vol1 | vol2
+  category TEXT NOT NULL CHECK (category IN ('p','s','r')), -- 前缀 / 后缀 / 词根
+  num INTEGER NOT NULL,              -- number within its category in the book
+  header TEXT NOT NULL,              -- 构词分组 as printed
+  morphemes TEXT NOT NULL,           -- e.g. "agr(i), agr(o)"
+  variants TEXT NOT NULL,            -- JSON ["agr","agri","agro"]
+  english TEXT NOT NULL DEFAULT '',  -- e.g. "field, land"
+  description TEXT NOT NULL DEFAULT '',
+  meaning TEXT NOT NULL DEFAULT ''   -- short Chinese meaning
 );
-CREATE TABLE words (
+CREATE TABLE senses (
   id INTEGER PRIMARY KEY,
-  word TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  root_id INTEGER NOT NULL REFERENCES roots(id),
-  base_word TEXT,                    -- the word this one is built from, when known
-  pos TEXT NOT NULL DEFAULT '',      -- "n." / "v./n."
-  meaning TEXT NOT NULL,             -- "n. 能力；容量"
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  seq INTEGER NOT NULL,
+  text TEXT NOT NULL,                -- 分义 as printed
+  english TEXT NOT NULL DEFAULT '',
+  meaning TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE entries (
+  id INTEGER PRIMARY KEY,            -- 序号 in the workbook
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  sense_id INTEGER REFERENCES senses(id),
+  word TEXT NOT NULL COLLATE NOCASE,
   phonetic TEXT NOT NULL DEFAULT '',
-  exam_level TEXT NOT NULL DEFAULT '', -- 初 四 六 研 托 G …
-  mnemonic TEXT NOT NULL DEFAULT '', -- the book's 记 text
-  story TEXT NOT NULL DEFAULT '',    -- the part of the mnemonic after the breakdown
-  parts TEXT NOT NULL,               -- JSON [{t, g, k}] k: p prefix, r root, s suffix, c link, x other
-  parts_from TEXT NOT NULL,          -- book | derived
+  stars INTEGER NOT NULL,            -- 原书星级 1–3
+  meaning TEXT NOT NULL,             -- 词性及释义
+  mnemonic TEXT NOT NULL DEFAULT '', -- 构词记忆
+  story TEXT NOT NULL DEFAULT '',    -- 引申路径（记忆法）
+  tiles TEXT NOT NULL,               -- JSON [{t, g, k, f?}] k: p prefix, r root, s suffix, b base word, c link; f marks the group's morpheme
+  tiles_from TEXT NOT NULL,          -- book | group
   example_en TEXT NOT NULL DEFAULT '',
   example_cn TEXT NOT NULL DEFAULT '',
-  volume INTEGER NOT NULL,
-  seq INTEGER NOT NULL,
-  source TEXT NOT NULL
+  usage TEXT NOT NULL DEFAULT '',    -- 用法搭配
+  etymology TEXT NOT NULL DEFAULT '',-- 词源故事
+  origin TEXT NOT NULL DEFAULT ''    -- 词义溯源
 );
-CREATE TABLE word_roots (word_id INTEGER NOT NULL REFERENCES words(id), root_id INTEGER NOT NULL REFERENCES roots(id), PRIMARY KEY (word_id, root_id));
-CREATE TABLE affixes (kind TEXT NOT NULL CHECK (kind IN ('p','s')), text TEXT NOT NULL, gloss TEXT NOT NULL, uses INTEGER NOT NULL, PRIMARY KEY (kind, text));
-CREATE TABLE levels (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, seq INTEGER NOT NULL, volume INTEGER NOT NULL);
-CREATE TABLE level_roots (level_id INTEGER NOT NULL REFERENCES levels(id), root_id INTEGER NOT NULL REFERENCES roots(id), PRIMARY KEY (level_id, root_id));
-CREATE TABLE level_words (level_id INTEGER NOT NULL REFERENCES levels(id), word_id INTEGER NOT NULL REFERENCES words(id), seq INTEGER NOT NULL, PRIMARY KEY (level_id, word_id));
-CREATE INDEX words_root ON words(root_id);
+CREATE INDEX entries_word ON entries(word);
+CREATE INDEX entries_group ON entries(group_id);
+CREATE TABLE stations (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, category TEXT NOT NULL, seq INTEGER NOT NULL);
+CREATE TABLE station_groups (station_id INTEGER NOT NULL REFERENCES stations(id), group_id INTEGER NOT NULL REFERENCES groups(id), PRIMARY KEY (station_id, group_id));
+CREATE TABLE station_entries (station_id INTEGER NOT NULL REFERENCES stations(id), entry_id INTEGER NOT NULL REFERENCES entries(id), seq INTEGER NOT NULL, PRIMARY KEY (station_id, entry_id));
 `);
 db.exec('BEGIN');
-const insRoot = db.prepare('INSERT INTO roots (id,key,display,variants,meaning,mnemonic,volume,seq,source) VALUES (?,?,?,?,?,?,?,?,?)');
-roots.forEach((r, i) => { r.id = i + 1; insRoot.run(r.id, r.key, r.display, JSON.stringify(r.variants), r.meaning, r.mnemonic || '', r.volume, r.seq, r.source); });
-const insWord = db.prepare('INSERT INTO words (id,word,root_id,base_word,pos,meaning,phonetic,exam_level,mnemonic,story,parts,parts_from,example_en,example_cn,volume,seq,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
-const insWR = db.prepare('INSERT OR IGNORE INTO word_roots (word_id, root_id) VALUES (?,?)');
-words.forEach((w, i) => {
-  w.id = i + 1;
-  insWord.run(w.id, w.word, rootByKey.get(w.root).id, w.base || null, w.pos || '', w.meaning, w.phonetic || '', w.level || '', w.mnemonic || '', w.story || '', JSON.stringify(w.parts), w.derived ? 'derived' : 'book', w.example_en || '', w.example_cn || '', w.volume, i + 1, w.source);
-  insWR.run(w.id, rootByKey.get(w.root).id);
+const insG = db.prepare('INSERT INTO groups (id,category,num,header,morphemes,variants,english,description,meaning) VALUES (?,?,?,?,?,?,?,?,?)');
+const insS = db.prepare('INSERT INTO senses (id,group_id,seq,text,english,meaning) VALUES (?,?,?,?,?,?)');
+let senseId = 0;
+groups.forEach((g, i) => {
+  g.id = i + 1;
+  insG.run(g.id, g.cat, g.num, g.header, g.display, JSON.stringify(g.variants), g.en, g.desc, g.short);
+  g.senseIds = g.senses.map((s, j) => { senseId++; insS.run(senseId, g.id, j + 1, s.text, s.en, s.short); return senseId; });
 });
-for (const [k, root] of extraRoots) insWR.run(byWord.get(k).id, rootByKey.get(root).id);
-const insAff = db.prepare('INSERT INTO affixes (kind,text,gloss,uses) VALUES (?,?,?,?)');
-for (const k of ['p', 's']) {
-  const uses = new Map();
-  words.forEach(w => w.parts.forEach(p => { if (p.k === k && p.t.length > 1) uses.set(p.t.toLowerCase(), (uses.get(p.t.toLowerCase()) || 0) + 1); }));
-  for (const [t, n] of uses) { const g = bestGloss(k, t); if (n >= 3 && g) insAff.run(k, t, g, n); }
-}
-const insLv = db.prepare('INSERT INTO levels (id,key,seq,volume) VALUES (?,?,?,?)');
-const insLR = db.prepare('INSERT INTO level_roots (level_id, root_id) VALUES (?,?)');
-const insLW = db.prepare('INSERT INTO level_words (level_id, word_id, seq) VALUES (?,?,?)');
-levels.forEach((l, i) => {
-  insLv.run(i + 1, l.key, i + 1, rootByKey.get(l.roots[0]).volume);
-  l.roots.forEach(r => insLR.run(i + 1, rootByKey.get(r).id));
-  l.words.forEach((wi, n) => insLW.run(i + 1, words[wi].id, n + 1));
+const insE = db.prepare('INSERT INTO entries (id,group_id,sense_id,word,phonetic,stars,meaning,mnemonic,story,tiles,tiles_from,example_en,example_cn,usage,etymology,origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+for (const e of entries) insE.run(e.id, e.group.id, e.sense >= 0 ? e.group.senseIds[e.sense] : null, e.word, e.phonetic, e.stars, e.meaning, e.mnemonic, e.story, JSON.stringify(e.tiles), e.fromMn ? 'book' : 'group', e.example_en, e.example_cn, e.usage, e.etymology, e.origin);
+const insSt = db.prepare('INSERT INTO stations (id,key,category,seq) VALUES (?,?,?,?)');
+const insSG = db.prepare('INSERT INTO station_groups (station_id, group_id) VALUES (?,?)');
+const insSE = db.prepare('INSERT INTO station_entries (station_id, entry_id, seq) VALUES (?,?,?)');
+stations.forEach((s, i) => {
+  insSt.run(i + 1, s.key, s.cat, i + 1);
+  s.groups.forEach(g => insSG.run(i + 1, g.id));
+  s.entries.forEach((e, n) => insSE.run(i + 1, e.id, n + 1));
 });
-const insMeta = db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
-insMeta.run('schema', '1');
-insMeta.run('built', new Date().toISOString());
-insMeta.run('volume_starts', JSON.stringify(starts));
+const insM = db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
+insM.run('schema', '2');
+insM.run('source', 'sources/lexicon.xlsx');
+insM.run('built', new Date().toISOString());
+const quotes = sheetRows('章节附言').map(r => clean(r[1])).filter(Boolean);
+insM.run('quotes', JSON.stringify(quotes));
 db.exec('COMMIT');
 db.close();
 
-// ---------- 6. export the static bundle from the database ----------
-const { exportBundle } = require('../lib/lexicon');
-const js = exportBundle(DB_FILE);
-fs.writeFileSync(path.join(ROOT_DIR, 'public', 'data.js'), js);
+// ---------- 6. export the site's data file from the database ----------
+const { exportData } = require('../lib/lexicon');
+const json = exportData(DB_FILE);
+fs.writeFileSync(path.join(ROOT_DIR, 'public', 'data.json'), json);
 
-const count = (f, v) => words.filter(w => f(w) && (v == null || w.volume === v)).length;
-console.log(`roots ${roots.length} (上册 ${vol1Roots.length}, 下册 ${roots.length - vol1Roots.length})`);
-console.log(`words ${words.length} (上册 ${count(() => true, 1)}, 下册 ${count(() => true, 2)}), extra root links ${extraRoots.length}`);
-console.log(`tiles from book ${count(w => !w.derived)}, derived from a relative ${count(w => w.derived && w.base)}, root only ${count(w => w.derived && !w.base && w.parts.length > 1)}, unsplit ${count(w => w.parts.length < 2)}`);
-console.log(`examples ${count(w => w.example_en)}, phonetics ${count(w => w.phonetic)}, exam tags ${count(w => w.level)}`);
-console.log(`stations ${levels.length} (volume starts ${starts.join(', ')}), sizes ${Math.min(...levels.map(l => l.words.length))}–${Math.max(...levels.map(l => l.words.length))}`);
-console.log(`public/data.js ${(js.length / 1024).toFixed(0)} KB`);
+const by = c => entries.filter(e => e.group.cat === c).length;
+const uniq = new Set(entries.map(e => e.word.toLowerCase())).size;
+console.log(`groups ${groups.length} (前缀 ${groups.filter(g => g.cat === 'p').length}, 后缀 ${groups.filter(g => g.cat === 's').length}, 词根 ${groups.filter(g => g.cat === 'r').length})`);
+console.log(`entries ${entries.length} (前缀 ${by('p')}, 后缀 ${by('s')}, 词根 ${by('r')}), distinct words ${uniq}, skipped ${rows.length - entries.length}`);
+console.log(`tiles from the book's breakdown ${fromBook}, from the group's morpheme ${entries.length - fromBook}, unsplit ${entries.filter(e => e.tiles.length < 2).length}`);
+console.log(`examples ${entries.filter(e => e.example_en).length}, usage ${entries.filter(e => e.usage).length}, etymology ${entries.filter(e => e.etymology).length}`);
+console.log(`stations ${stations.length} (前缀 ${stations.filter(s => s.cat === 'p').length}, 后缀 ${stations.filter(s => s.cat === 's').length}, 词根 ${stations.filter(s => s.cat === 'r').length}), sizes ${Math.min(...stations.map(s => s.entries.length))}–${Math.max(...stations.map(s => s.entries.length))}`);
+console.log(`public/data.json ${(Buffer.byteLength(json) / 1024).toFixed(0)} KB`);

@@ -1,5 +1,5 @@
-// Procedural reward stamps: station postmarks (per level) and carved chapter seals.
-(() => {
+// Procedural reward stamps (SVG strings): station postmarks and carved chapter seals.
+const STAMPS = (() => {
   let uid = 0;
   const TAU = Math.PI * 2;
   const seedOf = s => { let h = 2166136261; for (const c of String(s)) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; };
@@ -42,7 +42,7 @@
     const len = o.label.length, fs = Math.min(34, 86 / (0.56 * len));
     const text = `<defs><path id="${id}a" d="M28 100A72 72 0 0 1 172 100"/><path id="${id}b" d="M18 100A82 82 0 0 0 182 100"/></defs>
       <g stroke="none" font-family="'Bricolage Grotesque','Avenir Next','Segoe UI',sans-serif">
-      <text font-size="12.5" font-weight="700" letter-spacing="3.2"><textPath href="#${id}a" startOffset="50%" text-anchor="middle">ROOT STATION</textPath></text>
+      <text font-size="12.5" font-weight="700" letter-spacing="3.2"><textPath href="#${id}a" startOffset="50%" text-anchor="middle">${esc(o.top || 'ROOT STATION')}</textPath></text>
       <text font-size="10.5" font-weight="600" letter-spacing="1.6"><textPath href="#${id}b" startOffset="50%" text-anchor="middle">No.${String(o.no).padStart(3, '0')}${o.date ? ' · ' + esc(o.date) : ''}</textPath></text>
       <text x="100" y="${106 + fs * 0.08}" text-anchor="middle" font-size="${fs.toFixed(1)}" font-weight="800" letter-spacing="-.5">${esc(o.label)}</text>
       <text x="100" y="126" text-anchor="middle" font-size="11" font-weight="700" font-family="'Noto Serif SC','Songti SC',serif">${esc((o.sub || '').slice(0, 7))}</text>
@@ -60,5 +60,6 @@
       : `<rect x="14" y="14" width="172" height="172" rx="11" fill="none" stroke="currentColor" stroke-width="9"/><g fill="currentColor">${chars}</g>`;
     return `<svg class="stamp seal ink-red" viewBox="0 0 200 200" role="img" aria-label="章节印 ${esc(o.text)}"><g ${o.rough ? 'filter="url(#ink)"' : ''}>${body}</g></svg>`;
   }
-  window.RQ_STAMPS = { station, seal };
+  return { station, seal };
 })();
+export const { station, seal } = STAMPS;

@@ -3,7 +3,7 @@
 process.removeAllListeners('warning'); // node:sqlite prints an ExperimentalWarning on load
 const http = require('http'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
-const { exportBundle, openLexicon } = require('./lib/lexicon');
+const { exportData, openLexicon } = require('./lib/lexicon');
 const { sendMail, mailConfigured } = require('./lib/mailer');
 
 const PORT = process.env.PORT || 3000;
@@ -20,7 +20,9 @@ const cookie = (req, value, maxAge) => `rq_sid=${value}; HttpOnly; SameSite=Lax;
 
 if (!fs.existsSync(LEXICON_DB)) { console.error('缺少词库 data/lexicon.db，请先运行 node tools/build-db.js'); process.exit(1); }
 const lexicon = openLexicon(LEXICON_DB);
-const DATA_JS = exportBundle(LEXICON_DB);
+const DATA_JSON = Buffer.from(exportData(LEXICON_DB)); // the site's word data, built from the database at start
+const zlib = require('zlib');
+const DATA_GZ = zlib.gzipSync(DATA_JSON);
 
 // ---------- accounts database ----------
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -151,12 +153,16 @@ async function api(req, res, route, url) {
   if (req.method !== 'GET' && !sameOrigin) return send(res, 403, { error: '请求来源不被允许' });
 
   // word data (read-only)
-  if (req.method === 'GET' && route === 'roots') return send(res, 200, { roots: lexicon.roots() });
+  if (req.method === 'GET' && route === 'groups') {
+    const cat = url.searchParams.get('category') || '';
+    if (cat && !['p', 's', 'r'].includes(cat)) return send(res, 400, { error: 'category 只能是 p、s 或 r' });
+    return send(res, 200, { groups: lexicon.groups(cat) });
+  }
   if (req.method === 'GET' && route === 'words') {
-    const root = url.searchParams.get('root'), q = (url.searchParams.get('q') || '').trim();
-    if (root) return send(res, 200, { words: lexicon.wordsOfRoot(root) });
+    const cat = url.searchParams.get('category'), num = Number(url.searchParams.get('group')), q = (url.searchParams.get('q') || '').trim();
+    if (cat && num) return send(res, 200, { words: lexicon.wordsOfGroup(cat, num) });
     if (q) return send(res, 200, { words: lexicon.search(q.slice(0, 40)) });
-    return send(res, 400, { error: '请提供 root 或 q 参数' });
+    return send(res, 400, { error: '请提供 category 和 group，或 q 参数' });
   }
 
   const me = currentUser(req);
@@ -270,8 +276,7 @@ async function api(req, res, route, url) {
   send(res, 404, { error: '没有这个接口' });
 }
 
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
-const SHELL = body => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}[hidden]{display:none!important}</style></head><body>${body}</body></html>`;
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2' };
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -279,19 +284,17 @@ const server = http.createServer((req, res) => {
     return api(req, res, url.pathname.slice(5), url).catch(() => send(res, 400, { error: '请求格式不正确' }));
   }
   if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
-  if (url.pathname === '/' || url.pathname === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(SHELL(fs.readFileSync(path.join(PUB, 'page.html'), 'utf8')));
+  if (url.pathname === '/data.json') { // word data straight from the database
+    const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache', ...(gz ? { 'Content-Encoding': 'gzip' } : {}) });
+    return res.end(gz ? DATA_GZ : DATA_JSON);
   }
-  if (url.pathname === '/data.js') { // word data straight from the database
-    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
-    return res.end(DATA_JS);
-  }
-  const file = path.normalize(path.join(PUB, url.pathname));
+  const file = path.normalize(path.join(PUB, url.pathname === '/' ? 'index.html' : url.pathname));
   if (!file.startsWith(PUB + path.sep)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': (TYPES[path.extname(file)] || 'application/octet-stream') + '; charset=utf-8' });
+    const ext = path.extname(file);
+    res.writeHead(200, { 'Content-Type': (TYPES[ext] || 'application/octet-stream') + (ext === '.woff2' ? '' : '; charset=utf-8'), 'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600' });
     res.end(buf);
   });
 }).listen(PORT, () => {

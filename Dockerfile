@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json server.js ./
 COPY lib ./lib
 COPY public ./public
-COPY data/lexicon.db data/legacy-v1.json data/legacy-stations.json ./data/
+COPY data/lexicon.db data/legacy.json ./data/
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/data TRUST_PROXY=1
 RUN mkdir -p /data && chown node:node /data
 USER node
