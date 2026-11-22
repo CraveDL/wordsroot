@@ -64,6 +64,8 @@ npm run dev         # 前端热更新（另开一个终端运行 node server.js 
 
 ### 方式一：Render（海外，最省事）
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/CraveDL/wordsroot)
+
 1. 打开 https://dashboard.render.com/blueprints ，点 **New Blueprint Instance**。
 2. 连接 GitHub，选这个仓库，Render 会读取 `render.yaml`，点 **Apply**。
 3. 几分钟后得到形如 `https://wordsroot.onrender.com` 的网址。
